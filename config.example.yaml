@@ -1,0 +1,103 @@
+project:
+  name: brats-glioma-seg
+  edition: Medical-Decathlon-Task01-BrainTumour
+  seed: 42
+
+# Raíz del proyecto (carpeta que contiene Task01_BrainTumour/, output/, data/)
+# Copiar este archivo a config.yaml y ajustar la ruta.
+project_root: "C:/ruta/a/GLIOMAS CEREBRALES"
+
+stage_0:
+  decathlon_root: "Task01_BrainTumour"
+  images_subdir: "imagesTr"
+  labels_subdir: "labelsTr"
+  dataset_json: "dataset.json"
+  output_log: "output/stage_0/processing_log.csv"
+  volumes_dir: "output/stage_0/01_nifti_volumes"
+  masks_dir: "output/stage_0/02_nifti_masks"
+  audit_report: "output/stage_0/reporte_auditoria_stage_0.md"
+  channel_to_modality:
+    0: flair
+    1: t1
+    2: t1ce
+    3: t2
+  modalities: [t1, t1ce, t2, flair]
+  label_file: seg
+  max_cases: null
+
+stage_1:
+  output_log: "output/stage_1/preprocessing_log.csv"
+  volumes_dir: "output/stage_1/01_nifti_volumes"
+  masks_dir: "output/stage_1/02_nifti_masks"
+  audit_report: "output/stage_1/reporte_auditoria_stage_1.md"
+  modalities: [t1, t1ce, t2, flair]
+  label_file: seg
+  orientation: RAS
+  target_spacing: [1.0, 1.0, 1.0]
+  reference_modality: t1
+  image_interpolation: linear
+  label_interpolation: nearest
+  normalization:
+    method: percentile_clip_zscore
+    percentile_low: 0.5
+    percentile_high: 99.5
+    mask_source: flair
+    mask_threshold: 0.0
+    eps: 1.0e-8
+  max_cases: null
+
+stage_2:
+  output_log: "output/stage_2/conversion_log.csv"
+  audit_report: "output/stage_2/reporte_auditoria_stage_2.md"
+  nnunet_raw: "data/nnunet_raw"
+  modalities: [t1, t1ce, t2, flair]
+  label_file: seg
+  max_cases: null
+
+stage_3:
+  output_log: "output/stage_3/training_log.csv"
+  audit_report: "output/stage_3/reporte_auditoria_stage_3.md"
+  nnunet_raw: "data/nnunet_raw"
+  nnunet_preprocessed: "data/nnunet_preprocessed"
+  nnunet_results: "data/nnunet_results"
+  run_plan_and_preprocess: true
+  run_train: true
+  verify_dataset_integrity: true
+  clean_fingerprint: false
+  no_preprocess: false
+  np: 2
+  np_fingerprint: 2
+  configuration: 3d_fullres
+  configurations: [3d_fullres]
+  trainer: nnUNetTrainer
+  plans: nnUNetPlans
+  folds: [0]
+  device: auto
+  continue_training: false
+  npz: false
+  only_validation: false
+  continue_on_fold_fail: false
+  num_gpus: 1
+
+labels:
+  classes:
+    background: 0
+    edema: 1
+    non_enhancing: 2
+    enhancing: 3
+  valid: [0, 1, 2, 3]
+  regions:
+    WT: [1, 2, 3]
+    TC: [2, 3]
+    ET: [3]
+
+nnunet:
+  dataset_id: 101
+  dataset_name: Dataset101_BraTS
+  configuration: 3d_fullres
+  fold: 0
+
+paths:
+  nnunet_raw: data/nnunet_raw
+  nnunet_preprocessed: data/nnunet_preprocessed
+  nnunet_results: data/nnunet_results

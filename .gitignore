@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+ENV/
+
+# Tests / cobertura
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Secrets / local
+.env
+.env.*
+*.pem
+credentials.json
+config.yaml
+
+# nnU-Net / modelos
+*.pth
+*.pt
+*.ckpt
+*.npz
+*.pkl
+*.h5
+*.hdf5
+
+# Datos médicos y artefactos del pipeline (solo en project_root, no en el repo)
+/Task01_BrainTumour/
+/output/
+/data/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs sueltos
+*.log
+
+# Carpeta accidental de GitHub Desktop (repo vacío anidado)
+brats-glioma/
