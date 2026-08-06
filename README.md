@@ -9,8 +9,8 @@ Cuatro modalidades MRI (T1, T1ce, T2, FLAIR), etiquetas Decathlon `{0,1,2,3}` y 
 ```
 Task01_BrainTumour/     →  Stage 0  →  output/stage_0/
                          →  Stage 1  →  output/stage_1/
-                         →  Stage 2  →  data/nnunet_raw/Dataset101_BraTS/
-                         →  Stage 3  →  data/nnunet_preprocessed/ + data/nnunet_results/
+                         →  Stage 2  →  output/stage_2/nnunet_raw/Dataset101_BraTS/
+                         →  Stage 3  →  output/stage_3/nnunet_preprocessed/ + nnunet_results/
                          →  Stage 4  →  eval (pendiente)
 ```
 
@@ -37,7 +37,7 @@ pip install -r requirements.txt
 ## Configuración
 
 1. Copiá `config.example.yaml` → `config.yaml` (o editá el existente).
-2. Ajustá `project_root` a la carpeta que contiene `Task01_BrainTumour/`, `output/` y `data/`.
+2. Ajustá `project_root` a la carpeta que contiene `Task01_BrainTumour/` y `output/`.
 
 Ejemplo de layout local:
 
@@ -46,10 +46,11 @@ GLIOMAS CEREBRALES/
 ├── Task01_BrainTumour/
 ├── brats-glioma-seg/          ← este repo
 ├── output/
-└── data/
-    ├── nnunet_raw/
-    ├── nnunet_preprocessed/
-    └── nnunet_results/
+│   ├── stage_0/ … stage_1/
+│   ├── stage_2/nnunet_raw/Dataset101_BraTS/
+│   └── stage_3/
+│       ├── nnunet_preprocessed/
+│       └── nnunet_results/
 ```
 
 ## Uso

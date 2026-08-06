@@ -1,13 +1,13 @@
 """Stage 3: Plan/preprocess + entrenamiento nnU-Net v2.
 
-Entrada: data/nnunet_raw/Dataset101_BraTS (Stage 2).
+Entrada: output/stage_2/nnunet_raw/Dataset101_BraTS (Stage 2).
 Pasos:
   1) nnUNetv2_plan_and_preprocess  — fingerprint, planes, preprocesado interno
   2) nnUNetv2_train                — entrena fold(s) (default fold 0, 3d_fullres)
 
 Salidas:
-  data/nnunet_preprocessed/Dataset101_BraTS/
-  data/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/
+  output/stage_3/nnunet_preprocessed/Dataset101_BraTS/
+  output/stage_3/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/
 """
 
 from __future__ import annotations
@@ -48,9 +48,9 @@ def stage3_paths(config: dict) -> dict:
         value = cfg.get(key) or config.get("paths", {}).get(key) or default
         return resolve_under_root(root, value)
 
-    nnunet_raw = _cfg_path("nnunet_raw", s2.get("nnunet_raw", "data/nnunet_raw"))
-    nnunet_preprocessed = _cfg_path("nnunet_preprocessed", "data/nnunet_preprocessed")
-    nnunet_results = _cfg_path("nnunet_results", "data/nnunet_results")
+    nnunet_raw = _cfg_path("nnunet_raw", s2.get("nnunet_raw", "output/stage_2/nnunet_raw"))
+    nnunet_preprocessed = _cfg_path("nnunet_preprocessed", "output/stage_3/nnunet_preprocessed")
+    nnunet_results = _cfg_path("nnunet_results", "output/stage_3/nnunet_results")
 
     dataset_id = int(nn_cfg.get("dataset_id", 101))
     dataset_name = str(nn_cfg.get("dataset_name", "Dataset101_BraTS"))

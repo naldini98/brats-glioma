@@ -55,7 +55,7 @@ Comando: `python main.py --stage stage_1 --yes`
 
 Comando: `python main.py --stage stage_2 --yes`  
 Auditoría: `python tools/audit_stage_2.py`  
-Dataset: `data/nnunet_raw/Dataset101_BraTS/`
+Dataset: `output/stage_2/nnunet_raw/Dataset101_BraTS/`
 
 ### Stage 3 (completar tras corrida)
 

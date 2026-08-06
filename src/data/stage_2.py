@@ -1,7 +1,7 @@
 """Stage 2: Conversión a formato nnU-Net v2 (Dataset101_BraTS).
 
 Entrada: output/stage_1 (solo SUCCESS_PREPROCESSED).
-Salida: data/nnunet_raw/Dataset101_BraTS/ (imagesTr + labelsTr + dataset.json).
+Salida: output/stage_2/nnunet_raw/Dataset101_BraTS/ (imagesTr + labelsTr + dataset.json).
 
 No altera geometría ni intensidades: solo renombra/copia y empaqueta metadatos.
 Clases Decathlon {0,1,2,3}. Sin remap a BraTS clásico {0,1,2,4}.
@@ -43,7 +43,7 @@ def stage2_paths(config: dict) -> dict[str, Path]:
         value = Path(cfg[key])
         return value if value.is_absolute() else (root / value)
 
-    nnunet_raw = cfg.get("nnunet_raw") or config.get("paths", {}).get("nnunet_raw", "data/nnunet_raw")
+    nnunet_raw = cfg.get("nnunet_raw") or config.get("paths", {}).get("nnunet_raw", "output/stage_2/nnunet_raw")
     nnunet_raw_path = Path(nnunet_raw)
     if not nnunet_raw_path.is_absolute():
         nnunet_raw_path = root / nnunet_raw_path

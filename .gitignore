@@ -53,7 +53,6 @@ config.yaml
 # Datos médicos y artefactos del pipeline (solo en project_root, no en el repo)
 /Task01_BrainTumour/
 /output/
-/data/
 
 # OS
 .DS_Store

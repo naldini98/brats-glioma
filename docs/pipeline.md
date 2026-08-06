@@ -17,10 +17,10 @@ output/stage_0/
 output/stage_1/
     |
     v  Stage 2: Convert nnU-Net v2
-data/nnunet_raw/Dataset101_BraTS/
+output/stage_2/nnunet_raw/Dataset101_BraTS/
     |
     v  Stage 3: Plan/preprocess + Train nnU-Net
-data/nnunet_preprocessed/ + data/nnunet_results/
+output/stage_3/nnunet_preprocessed/ + output/stage_3/nnunet_results/
     |
     v  Stage 4: Eval Dice (pendiente)
 ```
@@ -131,7 +131,7 @@ Entrada: solo casos SUCCESS_PREPROCESSED de `output/stage_1/`.
 
 | Artefacto | Ruta |
 |-----------|------|
-| Dataset nnU-Net | `data/nnunet_raw/Dataset101_BraTS/` |
+| Dataset nnU-Net | `output/stage_2/nnunet_raw/Dataset101_BraTS/` |
 | Imágenes | `.../imagesTr/` |
 | Etiquetas | `.../labelsTr/` |
 | Metadatos | `.../dataset.json` |
@@ -146,7 +146,7 @@ Auditoría: `python tools/audit_stage_2.py`
 
 ```yaml
 stage_2:
-  nnunet_raw: "data/nnunet_raw"
+  nnunet_raw: "output/stage_2/nnunet_raw"
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
 
@@ -173,7 +173,7 @@ Stage 3: `python main.py --stage stage_3 --yes`
 Comando: `python main.py --stage stage_3 --yes`  
 Aliases: `python main.py --stage train --yes` · `python scripts/train_nnunet.py --yes`
 
-Entrada: `data/nnunet_raw/Dataset101_BraTS/` (Stage 2 completo).
+Entrada: `output/stage_2/nnunet_raw/Dataset101_BraTS/` (Stage 2 completo).
 
 ### Qué hace (2 pasos)
 
@@ -188,16 +188,16 @@ Stage 3 **no** reescribe Stage 1/2: nnU-Net aplica su propio preprocesado encima
 
 | Variable | Ruta (bajo project_root) |
 |----------|--------------------------|
-| `nnUNet_raw` | `data/nnunet_raw` |
-| `nnUNet_preprocessed` | `data/nnunet_preprocessed` |
-| `nnUNet_results` | `data/nnunet_results` |
+| `nnUNet_raw` | `output/stage_2/nnunet_raw` |
+| `nnUNet_preprocessed` | `output/stage_3/nnunet_preprocessed` |
+| `nnUNet_results` | `output/stage_3/nnunet_results` |
 
 ### Salidas Stage 3
 
 | Artefacto | Ruta |
 |-----------|------|
-| Planes + datos preprocesados | `data/nnunet_preprocessed/Dataset101_BraTS/` |
-| Checkpoints | `data/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/` |
+| Planes + datos preprocesados | `output/stage_3/nnunet_preprocessed/Dataset101_BraTS/` |
+| Checkpoints | `output/stage_3/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/` |
 | Log | `output/stage_3/training_log.csv` |
 | Auditoría | `output/stage_3/reporte_auditoria_stage_3.md` |
 
@@ -209,6 +209,9 @@ Auditoría: `python tools/audit_stage_3.py`
 
 ```yaml
 stage_3:
+  nnunet_raw: "output/stage_2/nnunet_raw"
+  nnunet_preprocessed: "output/stage_3/nnunet_preprocessed"
+  nnunet_results: "output/stage_3/nnunet_results"
   run_plan_and_preprocess: true
   run_train: true
   configuration: 3d_fullres
@@ -253,24 +256,26 @@ Solo train (si ya hay planes): `python scripts/train_nnunet.py --train-only --ye
 C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES/
 ├── Task01_BrainTumour/          # materia prima Decathlon
 ├── brats-glioma-seg/            # código + config.yaml
-├── data/
-│   ├── nnunet_raw/
-│   │   └── Dataset101_BraTS/    # Stage 2
-│   ├── nnunet_preprocessed/     # Stage 3
-│   └── nnunet_results/          # Stage 3
 └── output/
     ├── stage_0/
     ├── stage_1/
     ├── stage_2/
+    │   └── nnunet_raw/
+    │       └── Dataset101_BraTS/  # Stage 2 (formato nnU-Net)
     └── stage_3/
+        ├── training_log.csv
+        ├── nnunet_preprocessed/   # Stage 3 (plan/preprocess nnU-Net)
+        └── nnunet_results/        # Stage 3 (checkpoints)
 ```
 
-`stage_2`/`stage_3` paths se resuelven bajo `project_root`.
+`stage_*` paths se resuelven bajo `project_root`.
 
 ## Historial
 
 | Fecha | Cambio |
 |-------|--------|
+| 2026-08-06 | Todas las salidas bajo `output/` (Stage 3: preprocessed + results en `output/stage_3/`). |
+| 2026-08-06 | Stage 2: salida nnU-Net bajo `output/stage_2/nnunet_raw/`. |
 | 2026-07-28 | Stage 3: plan/preprocess + train nnU-Net v2 (Dataset101, 3d_fullres). |
 | 2026-07-28 | Stage 2: conversión a nnU-Net v2 (Dataset101_BraTS), clases Decathlon. |
 | 2026-07-23 | Proyecto movido a ruta sin acentos. write_nifti con verificación read-after-write. |

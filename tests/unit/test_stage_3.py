@@ -156,11 +156,11 @@ def test_build_commands(tmp_path: Path):
 def test_stage3_paths_from_config(tmp_path: Path):
     config = {
         "project_root": str(tmp_path),
-        "stage_2": {"nnunet_raw": "data/nnunet_raw"},
+        "stage_2": {"nnunet_raw": "output/stage_2/nnunet_raw"},
         "stage_3": {
-            "nnunet_raw": "data/nnunet_raw",
-            "nnunet_preprocessed": "data/nnunet_preprocessed",
-            "nnunet_results": "data/nnunet_results",
+            "nnunet_raw": "output/stage_2/nnunet_raw",
+            "nnunet_preprocessed": "output/stage_3/nnunet_preprocessed",
+            "nnunet_results": "output/stage_3/nnunet_results",
             "configuration": "3d_fullres",
             "folds": [0],
         },
@@ -173,4 +173,4 @@ def test_stage3_paths_from_config(tmp_path: Path):
     paths = stage3_paths(config)
     assert paths["dataset_id"] == 101
     assert paths["dataset_folder"].name == "Dataset101_BraTS"
-    assert paths["nnunet_preprocessed"] == tmp_path / "data" / "nnunet_preprocessed"
+    assert paths["nnunet_preprocessed"] == tmp_path / "output" / "stage_3" / "nnunet_preprocessed"
