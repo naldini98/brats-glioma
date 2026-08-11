@@ -1,176 +1,132 @@
-"""Tests Stage 3: helpers nnU-Net (sin entrenar)."""
+"""Tests Stage 3: conversión a formato nnU-Net v2."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from unittest.mock import patch
 
-from src.models.nnunet_env import (
-    apply_nnunet_env,
-    detect_device,
-    expected_results_dir,
-    fold_checkpoint_path,
-    parse_folds,
-    plans_json_path,
+import numpy as np
+import pytest
+import SimpleITK as sitk
+
+from src.data.dicom_geometry import write_nifti
+from src.data.nnunet_convert import (
+    build_dataset_json,
+    channel_filename,
+    dataset_folder_name,
+    label_filename,
+    nnunet_case_id,
 )
-from src.models.stage_3 import (
-    STATUS_FAIL,
-    STATUS_OK,
-    STATUS_PLANNED,
-    build_plan_command,
-    build_train_command,
-    stage3_paths,
-    verify_fold_checkpoint,
-    verify_plans,
-    verify_stage2_dataset,
-)
+from src.data.stage_3 import STATUS_OK, process_one_case_labeled, verify_stage_3_output
 
 
-def test_parse_folds():
-    assert parse_folds([0]) == [0]
-    assert parse_folds("all") == [0, 1, 2, 3, 4]
-    assert parse_folds(2) == [2]
-    assert parse_folds(None) == [0]
+def _make_mri(size=(16, 16, 8), value=1.0, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
+    arr = np.full((size[2], size[1], size[0]), value, dtype=np.float32)
+    img = sitk.GetImageFromArray(arr)
+    img.SetSpacing(spacing)
+    img.SetOrigin((0.0, 0.0, 0.0))
+    img.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    return img
 
 
-def test_apply_nnunet_env(tmp_path: Path):
-    raw = tmp_path / "raw"
-    pre = tmp_path / "pre"
-    res = tmp_path / "res"
-    env = apply_nnunet_env(nnunet_raw=raw, nnunet_preprocessed=pre, nnunet_results=res)
-    assert Path(env["nnUNet_raw"]) == raw.resolve()
-    assert Path(env["nnUNet_preprocessed"]) == pre.resolve()
-    assert Path(env["nnUNet_results"]) == res.resolve()
+def _make_seg(size=(16, 16, 8), spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
+    arr = np.zeros((size[2], size[1], size[0]), dtype=np.uint8)
+    arr[2:5, 4:8, 4:8] = 1
+    arr[3:6, 6:10, 6:10] = 2
+    arr[4:6, 7:11, 7:11] = 3
+    img = sitk.GetImageFromArray(arr)
+    img = sitk.Cast(img, sitk.sitkUInt8)
+    img.SetSpacing(spacing)
+    img.SetOrigin((0.0, 0.0, 0.0))
+    img.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    return img
 
 
-def test_detect_device_explicit_cpu():
-    assert detect_device("cpu") == "cpu"
-
-
-def test_paths_and_checkpoints(tmp_path: Path):
-    results = expected_results_dir(
-        tmp_path / "results",
-        dataset_name="Dataset101_BraTS",
-        trainer="nnUNetTrainer",
-        plans="nnUNetPlans",
-        configuration="3d_fullres",
-    )
-    ckpt = fold_checkpoint_path(results, 0)
-    assert ckpt.name == "checkpoint_final.pth"
-    assert "fold_0" in str(ckpt)
-
-    plans = plans_json_path(tmp_path / "pre", "Dataset101_BraTS")
-    assert plans.name == "nnUNetPlans.json"
-
-
-def test_verify_stage2_and_plans(tmp_path: Path):
-    ds = tmp_path / "raw" / "Dataset101_BraTS"
-    (ds / "imagesTr").mkdir(parents=True)
-    (ds / "labelsTr").mkdir(parents=True)
-    (ds / "dataset.json").write_text("{}", encoding="utf-8")
-    (ds / "labelsTr" / "BRATS_001.nii.gz").write_bytes(b"x" * 200)
-
-    paths = {
-        "dataset_json": ds / "dataset.json",
-        "images_tr": ds / "imagesTr",
-        "labels_tr": ds / "labelsTr",
-        "nnunet_preprocessed": tmp_path / "pre",
-        "dataset_name": "Dataset101_BraTS",
-        "plans": "nnUNetPlans",
-        "nnunet_results": tmp_path / "results",
-        "trainer": "nnUNetTrainer",
-        "configuration": "3d_fullres",
+@pytest.fixture
+def stage1_case_dir(tmp_path: Path):
+    case_id = "BRATS_TEST"
+    vol_dir = tmp_path / "stage1" / "01_nifti_volumes" / f"volume_{case_id}"
+    mask_dir = tmp_path / "stage1" / "02_nifti_masks" / f"volume_{case_id}"
+    vol_dir.mkdir(parents=True)
+    mask_dir.mkdir(parents=True)
+    for mod, val in [("t1", 0.1), ("t1ce", 0.2), ("t2", 0.3), ("flair", 0.4)]:
+        write_nifti(_make_mri(value=val), vol_dir / f"volume_{case_id}-{mod}.nii.gz")
+    write_nifti(_make_seg(), mask_dir / f"volume_{case_id}-seg.nii.gz")
+    images_tr = tmp_path / "nnunet" / "Dataset101_BraTS" / "imagesTr"
+    labels_tr = tmp_path / "nnunet" / "Dataset101_BraTS" / "labelsTr"
+    images_tr.mkdir(parents=True)
+    labels_tr.mkdir(parents=True)
+    return {
+        "case_id": case_id,
+        "input_volumes": tmp_path / "stage1" / "01_nifti_volumes",
+        "input_masks": tmp_path / "stage1" / "02_nifti_masks",
+        "images_tr": images_tr,
+        "labels_tr": labels_tr,
     }
-    ok, msg = verify_stage2_dataset(paths)
-    assert ok
-    assert "1 casos" in msg
 
-    st, reason, _ = verify_plans(paths)
-    assert st == STATUS_FAIL
-    assert reason == "missing_plans"
 
-    plans = plans_json_path(paths["nnunet_preprocessed"], paths["dataset_name"])
-    plans.parent.mkdir(parents=True)
-    plans.write_text("{}", encoding="utf-8")
-    st, reason, _ = verify_plans(paths)
-    assert st == STATUS_PLANNED
+def test_naming_helpers():
+    assert nnunet_case_id("volume_BRATS_001") == "BRATS_001"
+    assert nnunet_case_id("BRATS_001") == "BRATS_001"
+    assert channel_filename("BRATS_001", 0) == "BRATS_001_0000.nii.gz"
+    assert channel_filename("BRATS_001", 3) == "BRATS_001_0003.nii.gz"
+    assert label_filename("BRATS_001") == "BRATS_001.nii.gz"
+    assert dataset_folder_name(101, "BraTS") == "Dataset101_BraTS"
+    assert dataset_folder_name(101, "Dataset101_BraTS") == "Dataset101_BraTS"
+
+
+def test_build_dataset_json_decathlon_labels():
+    meta = build_dataset_json(
+        modalities=["t1", "t1ce", "t2", "flair"],
+        labels={"background": 0, "edema": 1, "non_enhancing": 2, "enhancing": 3},
+        num_training=10,
+        dataset_name="Dataset101_BraTS",
+    )
+    assert meta["channel_names"]["0"] == "t1"
+    assert meta["channel_names"]["3"] == "flair"
+    assert meta["labels"]["enhancing"] == 3
+    assert meta["numTraining"] == 10
+    assert "4" not in [str(v) for v in meta["labels"].values()]
+
+
+def test_process_one_case_stage3(stage1_case_dir):
+    d = stage1_case_dir
+    modalities = ["t1", "t1ce", "t2", "flair"]
+    rec = process_one_case_labeled(
+        d["case_id"],
+        input_volumes_dir=d["input_volumes"],
+        input_masks_dir=d["input_masks"],
+        images_tr=d["images_tr"],
+        labels_tr=d["labels_tr"],
+        modalities=modalities,
+        label_file="seg",
+    )
+    assert rec["status"] == STATUS_OK
+    assert (d["images_tr"] / "BRATS_TEST_0000.nii.gz").exists()
+    assert (d["images_tr"] / "BRATS_TEST_0003.nii.gz").exists()
+    assert (d["labels_tr"] / "BRATS_TEST.nii.gz").exists()
+
+    status, reason, _ = verify_stage_3_output(
+        d["case_id"], d["images_tr"], d["labels_tr"], modalities
+    )
+    assert status == STATUS_OK
     assert reason == ""
 
+    t1 = sitk.ReadImage(str(d["images_tr"] / "BRATS_TEST_0000.nii.gz"))
+    arr = np.asarray(sitk.GetArrayFromImage(t1))
+    assert float(arr.mean()) == pytest.approx(0.1, abs=1e-5)
 
-def test_verify_fold_checkpoint(tmp_path: Path):
-    paths = {
-        "nnunet_results": tmp_path / "results",
-        "dataset_name": "Dataset101_BraTS",
-        "trainer": "nnUNetTrainer",
-        "plans": "nnUNetPlans",
-        "configuration": "3d_fullres",
-    }
-    st, reason, _ = verify_fold_checkpoint(paths, 0)
-    assert st == STATUS_FAIL
 
-    ckpt = fold_checkpoint_path(
-        expected_results_dir(
-            paths["nnunet_results"],
-            dataset_name=paths["dataset_name"],
-            trainer=paths["trainer"],
-            plans=paths["plans"],
-            configuration=paths["configuration"],
-        ),
-        0,
+def test_dataset_json_roundtrip(tmp_path: Path):
+    from src.data.nnunet_convert import write_dataset_json
+
+    meta = build_dataset_json(
+        modalities=["t1", "t1ce", "t2", "flair"],
+        labels={"background": 0, "edema": 1, "non_enhancing": 2, "enhancing": 3},
+        num_training=2,
+        dataset_name="Dataset101_BraTS",
     )
-    ckpt.parent.mkdir(parents=True)
-    ckpt.write_bytes(b"fake")
-    st, reason, det = verify_fold_checkpoint(paths, 0)
-    assert st == STATUS_OK
-    assert Path(det["checkpoint"]) == ckpt
-
-
-def test_build_commands(tmp_path: Path):
-    paths = {
-        "dataset_id": 101,
-        "configuration": "3d_fullres",
-        "trainer": "nnUNetTrainer",
-        "plans": "nnUNetPlans",
-    }
-    cfg = {
-        "verify_dataset_integrity": True,
-        "np": 2,
-        "configurations": ["3d_fullres"],
-    }
-    with patch("src.models.stage_3.find_nnunet_command", return_value="nnUNetv2_plan_and_preprocess"):
-        cmd = build_plan_command(paths, cfg)
-    assert cmd[0] == "nnUNetv2_plan_and_preprocess"
-    assert "-d" in cmd and "101" in cmd
-    assert "--verify_dataset_integrity" in cmd
-
-    with patch("src.models.stage_3.find_nnunet_command", return_value="nnUNetv2_train"):
-        tcmd = build_train_command(paths, {"continue_training": True}, fold=0, device="cpu")
-    assert tcmd[0] == "nnUNetv2_train"
-    assert "101" in tcmd
-    assert "3d_fullres" in tcmd
-    assert "0" in tcmd
-    assert "--c" in tcmd
-    assert "-device" in tcmd and "cpu" in tcmd
-
-
-def test_stage3_paths_from_config(tmp_path: Path):
-    config = {
-        "project_root": str(tmp_path),
-        "stage_2": {"nnunet_raw": "output/stage_2/nnunet_raw"},
-        "stage_3": {
-            "nnunet_raw": "output/stage_2/nnunet_raw",
-            "nnunet_preprocessed": "output/stage_3/nnunet_preprocessed",
-            "nnunet_results": "output/stage_3/nnunet_results",
-            "configuration": "3d_fullres",
-            "folds": [0],
-        },
-        "nnunet": {
-            "dataset_id": 101,
-            "dataset_name": "Dataset101_BraTS",
-            "configuration": "3d_fullres",
-        },
-    }
-    paths = stage3_paths(config)
-    assert paths["dataset_id"] == 101
-    assert paths["dataset_folder"].name == "Dataset101_BraTS"
-    assert paths["nnunet_preprocessed"] == tmp_path / "output" / "stage_3" / "nnunet_preprocessed"
+    path = write_dataset_json(tmp_path / "dataset.json", meta)
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    assert loaded["numTraining"] == 2
+    assert loaded["file_ending"] == ".nii.gz"

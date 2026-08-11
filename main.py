@@ -28,13 +28,18 @@ def main() -> None:
             "stage_1",
             "stage_2",
             "stage_3",
+            "stage_4",
             "preprocess",
+            "convert",
             "train",
             "eval",
             "all",
         ],
         required=True,
-        help="Etapa a ejecutar (preprocess=stage_1, train=stage_3)",
+        help=(
+            "Etapa a ejecutar (preprocess=stage_1, convert=stage_3, train=stage_4; "
+            "all=stage_0..3 sin stage_4)"
+        ),
     )
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument(
@@ -46,7 +51,8 @@ def main() -> None:
     config = load_config(args.config)
 
     run_stage_1 = args.stage in ["stage_1", "preprocess", "all"]
-    run_stage_3 = args.stage in ["stage_3", "train", "all"]
+    run_stage_3 = args.stage in ["stage_3", "convert", "all"]
+    run_stage_4 = args.stage in ["stage_4", "train", "eval"]
 
     if args.stage in ["stage_0", "all"]:
         print("[*] Stage 0: Generación de Volúmenes y Máscaras Base")
@@ -61,20 +67,29 @@ def main() -> None:
         _run_stage_1(config, yes=args.yes)
 
     if args.stage in ["stage_2", "all"]:
-        print("[*] Stage 2: Conversión a formato nnU-Net v2")
+        print("[*] Stage 2: Split Manager (train + test, imágenes con labels)")
         from src.data.stage_2 import run_stage_2
 
         run_stage_2(config, yes=args.yes)
 
     if run_stage_3:
-        print("[*] Stage 3: Plan/preprocess + Train (nnU-Net v2)")
-        from src.models.stage_3 import run_stage_3 as _run_stage_3
+        print("[*] Stage 3: Conversión a formato nnU-Net v2")
+        from src.data.stage_3 import run_stage_3 as _run_stage_3
 
         _run_stage_3(config, yes=args.yes)
 
-    if args.stage in ["eval", "all"]:
-        print("[*] Stage 4: Eval")
-        print("[!] Evaluación: pendiente de implementación en src/eval/")
+    if run_stage_4:
+        print("[*] Stage 4: Plan/preprocess + Train nnU-Net v2 (+ eval opcional)")
+        from src.models.stage_4 import run_stage_4 as _run_stage_4
+
+        if args.stage == "eval":
+            if "stage_4" not in config:
+                config["stage_4"] = {}
+            config["stage_4"]["run_plan_and_preprocess"] = False
+            config["stage_4"]["run_train"] = False
+            config["stage_4"]["run_predict"] = True
+            config["stage_4"]["run_eval"] = True
+        _run_stage_4(config, yes=args.yes)
 
 
 if __name__ == "__main__":

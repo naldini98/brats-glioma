@@ -1,133 +1,210 @@
-"""Tests Stage 2: conversión a formato nnU-Net v2."""
+"""Tests Stage 2: split train/test + imágenes con labels."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-import numpy as np
-import pytest
-import SimpleITK as sitk
-
-from src.data.dicom_geometry import write_nifti
-from src.data.nnunet_convert import (
-    build_dataset_json,
-    channel_filename,
-    dataset_folder_name,
-    label_filename,
-    nnunet_case_id,
+from src.data.dataset_split import (
+    ground_truth_filename,
+    partition_case_ids,
+    split_image_label_dirs,
+    verify_split_counts,
+    verify_split_disjoint,
+    verify_test_ground_truth_dir,
 )
-from src.data.stage_2 import STATUS_OK, process_one_case, verify_stage_2_output
+from src.data.dicom_geometry import write_nifti
+from src.data.stage_2 import STATUS_OK, copy_test_ground_truth_flat, run_stage_2
 
 
-def _make_mri(size=(16, 16, 8), value=1.0, spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
-    arr = np.full((size[2], size[1], size[0]), value, dtype=np.float32)
+def _tiny_mri():
+    import SimpleITK as sitk
+    import numpy as np
+
+    size = (16, 16, 8)
+    arr = np.zeros((size[2], size[1], size[0]), dtype=np.float32)
     img = sitk.GetImageFromArray(arr)
-    img.SetSpacing(spacing)
-    img.SetOrigin((0.0, 0.0, 0.0))
-    img.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    img.SetSpacing((1.0, 1.0, 1.0))
     return img
 
 
-def _make_seg(size=(16, 16, 8), spacing=(1.0, 1.0, 1.0)) -> sitk.Image:
+def _tiny_seg():
+    import SimpleITK as sitk
+    import numpy as np
+
+    size = (16, 16, 8)
     arr = np.zeros((size[2], size[1], size[0]), dtype=np.uint8)
     arr[2:5, 4:8, 4:8] = 1
-    arr[3:6, 6:10, 6:10] = 2
-    arr[4:6, 7:11, 7:11] = 3
     img = sitk.GetImageFromArray(arr)
     img = sitk.Cast(img, sitk.sitkUInt8)
-    img.SetSpacing(spacing)
-    img.SetOrigin((0.0, 0.0, 0.0))
-    img.SetDirection((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
+    img.SetSpacing((1.0, 1.0, 1.0))
     return img
 
 
-@pytest.fixture
-def stage1_case_dir(tmp_path: Path):
-    case_id = "BRATS_TEST"
-    vol_dir = tmp_path / "stage1" / "01_nifti_volumes" / f"volume_{case_id}"
-    mask_dir = tmp_path / "stage1" / "02_nifti_masks" / f"volume_{case_id}"
-    vol_dir.mkdir(parents=True)
-    mask_dir.mkdir(parents=True)
-    for mod, val in [("t1", 0.1), ("t1ce", 0.2), ("t2", 0.3), ("flair", 0.4)]:
-        write_nifti(_make_mri(value=val), vol_dir / f"volume_{case_id}-{mod}.nii.gz")
-    write_nifti(_make_seg(), mask_dir / f"volume_{case_id}-seg.nii.gz")
-    images_tr = tmp_path / "nnunet" / "Dataset101_BraTS" / "imagesTr"
-    labels_tr = tmp_path / "nnunet" / "Dataset101_BraTS" / "labelsTr"
-    images_tr.mkdir(parents=True)
-    labels_tr.mkdir(parents=True)
-    return {
-        "case_id": case_id,
-        "input_volumes": tmp_path / "stage1" / "01_nifti_volumes",
-        "input_masks": tmp_path / "stage1" / "02_nifti_masks",
-        "images_tr": images_tr,
-        "labels_tr": labels_tr,
+def test_partition_disjoint_and_sum():
+    ids = [f"BRATS_{i:03d}" for i in range(100)]
+    manifest = partition_case_ids(ids, seed=42)
+    ok_d, _ = verify_split_disjoint(manifest)
+    ok_c, _ = verify_split_counts(manifest, 100)
+    assert ok_d
+    assert ok_c
+    assert manifest["counts"]["train"] + manifest["counts"]["test"] == 100
+
+
+def test_partition_reproducible():
+    ids = [f"BRATS_{i:03d}" for i in range(50)]
+    a = partition_case_ids(ids, seed=42)
+    b = partition_case_ids(ids, seed=42)
+    assert a["train"] == b["train"]
+    assert a["test"] == b["test"]
+
+
+def test_484_train_test_ratios():
+    ids = [f"BRATS_{i:03d}" for i in range(484)]
+    m = partition_case_ids(ids, seed=42, ratios={"train": 0.85, "test": 0.15})
+    assert m["counts"]["train"] in {411, 412}
+    assert m["counts"]["test"] in {72, 73}
+
+
+def test_stage2_paths_minimal_config(tmp_path: Path):
+    """config.yaml parcial (sin claves nuevas de split) debe resolver rutas."""
+    from src.data.stage_2 import stage2_paths
+
+    config = {
+        "project_root": str(tmp_path),
+        "stage_0": {
+            "decathlon_root": "Task01_BrainTumour",
+            "output_log": "output/stage_0/processing_log.csv",
+            "volumes_dir": "output/stage_0/01_nifti_volumes",
+            "masks_dir": "output/stage_0/02_nifti_masks",
+            "audit_report": "output/stage_0/reporte_auditoria_stage_0.md",
+        },
+        "stage_1": {
+            "output_log": "output/stage_1/preprocessing_log.csv",
+            "volumes_dir": "output/stage_1/01_nifti_volumes",
+            "masks_dir": "output/stage_1/02_nifti_masks",
+            "audit_report": "output/stage_1/reporte_auditoria_stage_1.md",
+        },
+        "stage_2": {},
     }
+    paths = stage2_paths(config)
+    assert paths["split_manifest"] == tmp_path / "output/stage_2/dataset_split.json"
+    assert paths["splits_dir"] == tmp_path / "output/stage_2/splits"
 
 
-def test_naming_helpers():
-    assert nnunet_case_id("volume_BRATS_001") == "BRATS_001"
-    assert nnunet_case_id("BRATS_001") == "BRATS_001"
-    assert channel_filename("BRATS_001", 0) == "BRATS_001_0000.nii.gz"
-    assert channel_filename("BRATS_001", 3) == "BRATS_001_0003.nii.gz"
-    assert label_filename("BRATS_001") == "BRATS_001.nii.gz"
-    assert dataset_folder_name(101, "BraTS") == "Dataset101_BraTS"
-    assert dataset_folder_name(101, "Dataset101_BraTS") == "Dataset101_BraTS"
+def test_stage2_rejects_obsolete_nnunet_raw():
+    from src.data.stage_2 import stage2_paths
+
+    config = {
+        "project_root": "C:/tmp",
+        "stage_0": {
+            "decathlon_root": "Task01_BrainTumour",
+            "output_log": "output/stage_0/processing_log.csv",
+            "volumes_dir": "output/stage_0/01_nifti_volumes",
+            "masks_dir": "output/stage_0/02_nifti_masks",
+            "audit_report": "output/stage_0/reporte_auditoria_stage_0.md",
+        },
+        "stage_1": {
+            "output_log": "output/stage_1/preprocessing_log.csv",
+            "volumes_dir": "output/stage_1/01_nifti_volumes",
+            "masks_dir": "output/stage_1/02_nifti_masks",
+            "audit_report": "output/stage_1/reporte_auditoria_stage_1.md",
+        },
+        "stage_2": {"nnunet_raw": "output/stage_2/nnunet_raw"},
+    }
+    import pytest
+
+    with pytest.raises(ValueError, match="obsoletas"):
+        stage2_paths(config)
 
 
-def test_build_dataset_json_decathlon_labels():
-    meta = build_dataset_json(
-        modalities=["t1", "t1ce", "t2", "flair"],
-        labels={"background": 0, "edema": 1, "non_enhancing": 2, "enhancing": 3},
-        num_training=10,
-        dataset_name="Dataset101_BraTS",
-    )
-    assert meta["channel_names"]["0"] == "t1"
-    assert meta["channel_names"]["3"] == "flair"
-    assert meta["labels"]["enhancing"] == 3
-    assert meta["numTraining"] == 10
-    assert "4" not in [str(v) for v in meta["labels"].values()]
+def test_copy_test_ground_truth(tmp_path: Path):
+    case_id = "BRATS_099"
+    labels_ts = tmp_path / "test" / "labelsTs"
+    folder = f"volume_{case_id}"
+    mask_dir = labels_ts / folder
+    mask_dir.mkdir(parents=True)
 
-
-def test_process_one_case_stage2(stage1_case_dir):
-    d = stage1_case_dir
-    modalities = ["t1", "t1ce", "t2", "flair"]
-    rec = process_one_case(
-        d["case_id"],
-        input_volumes_dir=d["input_volumes"],
-        input_masks_dir=d["input_masks"],
-        images_tr=d["images_tr"],
-        labels_tr=d["labels_tr"],
-        modalities=modalities,
-        label_file="seg",
-    )
-    assert rec["status"] == STATUS_OK
-    assert (d["images_tr"] / "BRATS_TEST_0000.nii.gz").exists()
-    assert (d["images_tr"] / "BRATS_TEST_0003.nii.gz").exists()
-    assert (d["labels_tr"] / "BRATS_TEST.nii.gz").exists()
-
-    status, reason, _ = verify_stage_2_output(
-        d["case_id"], d["images_tr"], d["labels_tr"], modalities
+    write_nifti(_tiny_seg(), mask_dir / f"{folder}-seg.nii.gz")
+    gt_dir = tmp_path / "gt"
+    status, reason, path = copy_test_ground_truth_flat(
+        case_id, labels_ts_dir=labels_ts, gt_dir=gt_dir, label_file="seg"
     )
     assert status == STATUS_OK
     assert reason == ""
-
-    # Canal 0 = t1 (valor 0.1)
-    t1 = sitk.ReadImage(str(d["images_tr"] / "BRATS_TEST_0000.nii.gz"))
-    arr = np.asarray(sitk.GetArrayFromImage(t1))
-    assert float(arr.mean()) == pytest.approx(0.1, abs=1e-5)
+    assert Path(path).name == ground_truth_filename(case_id)
 
 
-def test_dataset_json_roundtrip(tmp_path: Path):
-    from src.data.nnunet_convert import write_dataset_json
+def test_run_stage_2_integration(tmp_path: Path):
+    """Pipeline split con log Stage 1 sintético."""
+    import pandas as pd
 
-    meta = build_dataset_json(
-        modalities=["t1", "t1ce", "t2", "flair"],
-        labels={"background": 0, "edema": 1, "non_enhancing": 2, "enhancing": 3},
-        num_training=2,
-        dataset_name="Dataset101_BraTS",
+    project = tmp_path
+    for i in range(10):
+        cid = f"BRATS_{i:03d}"
+        vdir = project / "output/stage_1/01_nifti_volumes/volume_{}".format(cid)
+        mdir = project / "output/stage_1/02_nifti_masks/volume_{}".format(cid)
+        vdir.mkdir(parents=True)
+        mdir.mkdir(parents=True)
+        for mod in ("t1", "t1ce", "t2", "flair"):
+            write_nifti(_tiny_mri(), vdir / f"volume_{cid}-{mod}.nii.gz")
+        write_nifti(_tiny_seg(), mdir / f"volume_{cid}-seg.nii.gz")
+
+    log = project / "output/stage_1/preprocessing_log.csv"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        {"case_id": [f"BRATS_{i:03d}" for i in range(10)], "status": ["SUCCESS_PREPROCESSED"] * 10}
+    ).to_csv(log, index=False)
+
+    config = {
+        "project_root": str(project),
+        "project": {"seed": 42},
+        "stage_0": {
+            "decathlon_root": "Task01_BrainTumour",
+            "output_log": "output/stage_0/processing_log.csv",
+            "volumes_dir": "output/stage_0/01_nifti_volumes",
+            "masks_dir": "output/stage_0/02_nifti_masks",
+            "audit_report": "output/stage_0/reporte_auditoria_stage_0.md",
+        },
+        "stage_1": {
+            "modalities": ["t1", "t1ce", "t2", "flair"],
+            "output_log": "output/stage_1/preprocessing_log.csv",
+            "volumes_dir": "output/stage_1/01_nifti_volumes",
+            "masks_dir": "output/stage_1/02_nifti_masks",
+            "audit_report": "output/stage_1/reporte_auditoria_stage_1.md",
+        },
+        "stage_2": {
+            "output_log": "output/stage_2/processing_log.csv",
+            "audit_report": "output/stage_2/reporte_auditoria_stage_2.md",
+            "split_manifest": "output/stage_2/dataset_split.json",
+            "splits_dir": "output/stage_2/splits",
+            "test_ground_truth_dir": "output/stage_2/test_ground_truth",
+            "seed": 42,
+            "ratios": {"train": 0.85, "test": 0.15},
+            "label_file": "seg",
+        },
+    }
+    run_stage_2(config, yes=True)
+    manifest = json.loads(
+        (project / "output/stage_2/dataset_split.json").read_text(encoding="utf-8")
     )
-    path = write_dataset_json(tmp_path / "dataset.json", meta)
-    loaded = json.loads(path.read_text(encoding="utf-8"))
-    assert loaded["numTraining"] == 2
-    assert loaded["file_ending"] == ".nii.gz"
+    train_dirs = split_image_label_dirs(project / "output/stage_2/splits/train", "train")
+    sample_train = manifest["train"][0]
+    assert (train_dirs["images"] / f"volume_{sample_train}").exists()
+    assert (
+        train_dirs["labels"]
+        / f"volume_{sample_train}"
+        / f"volume_{sample_train}-seg.nii.gz"
+    ).exists()
+    test_dirs = split_image_label_dirs(project / "output/stage_2/splits/test", "test")
+    sample_test = manifest["test"][0]
+    assert (test_dirs["images"] / f"volume_{sample_test}").exists()
+    assert (
+        test_dirs["labels"]
+        / f"volume_{sample_test}"
+        / f"volume_{sample_test}-seg.nii.gz"
+    ).exists()
+    ok_gt, _, _ = verify_test_ground_truth_dir(
+        manifest, project / "output/stage_2/test_ground_truth"
+    )
+    assert ok_gt

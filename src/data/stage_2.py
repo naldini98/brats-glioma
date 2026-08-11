@@ -1,71 +1,93 @@
-"""Stage 2: Conversión a formato nnU-Net v2 (Dataset101_BraTS).
+"""Stage 2: Split Manager — train y test con imágenes + labels emparejados.
 
-Entrada: output/stage_1 (solo SUCCESS_PREPROCESSED).
-Salida: output/stage_2/nnunet_raw/Dataset101_BraTS/ (imagesTr + labelsTr + dataset.json).
-
-No altera geometría ni intensidades: solo renombra/copia y empaqueta metadatos.
-Clases Decathlon {0,1,2,3}. Sin remap a BraTS clásico {0,1,2,4}.
+Entrada: output/stage_1 (SUCCESS_PREPROCESSED).
+Salida bajo output/stage_2/splits/:
+  train/imagesTr + train/labelsTr   (~85 %, CV la hace nnU-Net en Stage 4)
+  test/imagesTs + test/labelsTs     (~15 %, test ciego)
+  test_ground_truth/ (copia plana de labels test para eval Stage 4)
+  dataset_split.json, processing_log.csv
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
-import SimpleITK as sitk
 
-from src.data.dicom_geometry import ensure_dir, geometries_match, geometry_tuple, read_nifti
-from src.data.labels import invalid_seg_values, validate_seg
-from src.data.nnunet_convert import (
-    build_dataset_json,
-    copy_nifti,
-    nnunet_case_id,
-    nnunet_paths_for_case,
-    prepare_dataset_dirs,
-    write_dataset_json,
+from src.data.dataset_split import (
+    DEFAULT_RATIOS,
+    SPLIT_NAMES,
+    ground_truth_filename,
+    load_split_manifest,
+    partition_case_ids,
+    split_image_label_dirs,
+    verify_all_split_bundles,
+    verify_split_counts,
+    verify_split_disjoint,
+    verify_test_ground_truth_dir,
+    write_split_manifest,
 )
+from src.data.dicom_geometry import ensure_dir
+from src.data.nnunet_convert import copy_nifti
 from src.data.stage_0 import output_paths_for_case, project_root_from_config
 from src.data.stage_1 import STATUS_OK as STAGE1_OK
 from src.data.stage_1 import stage1_paths
 
-STATUS_OK = "SUCCESS_CONVERTED"
+STATUS_OK = "SUCCESS_SPLIT"
 STATUS_FAIL = "FAILED"
+
+# Claves del pipeline antiguo (Stage 2 = convert nnU-Net). No usar.
+STAGE2_OBSOLETE_KEYS = frozenset({"nnunet_raw", "conversion_log"})
+
+
+def validate_stage2_config(cfg: dict) -> None:
+    obsolete = STAGE2_OBSOLETE_KEYS & set(cfg.keys())
+    if obsolete:
+        names = ", ".join(sorted(obsolete))
+        raise ValueError(
+            f"stage_2 contiene claves obsoletas ({names}). "
+            "Stage 2 es solo split train/test. nnU-Net va en stage_3.nnunet_raw. "
+            "Editá config.yaml y borrá esas claves."
+        )
+    ratios = cfg.get("ratios") or {}
+    if "val" in ratios:
+        raise ValueError(
+            "stage_2.ratios.val ya no existe. Usá solo train y test (ej. train: 0.85, test: 0.15)."
+        )
 
 
 def stage2_paths(config: dict) -> dict[str, Path]:
     root = project_root_from_config(config)
     cfg = config["stage_2"]
+    validate_stage2_config(cfg)
     s1 = stage1_paths(config)
-    nn_cfg = config.get("nnunet", {})
 
-    def _p(key: str) -> Path:
-        value = Path(cfg[key])
+    def _p(key: str, default: str | None = None) -> Path:
+        raw = cfg[key] if key in cfg else default
+        if raw is None:
+            raise KeyError(key)
+        value = Path(raw)
         return value if value.is_absolute() else (root / value)
 
-    nnunet_raw = cfg.get("nnunet_raw") or config.get("paths", {}).get("nnunet_raw", "output/stage_2/nnunet_raw")
-    nnunet_raw_path = Path(nnunet_raw)
-    if not nnunet_raw_path.is_absolute():
-        nnunet_raw_path = root / nnunet_raw_path
+    splits_base = _p("splits_dir", "output/stage_2/splits")
 
-    dataset_id = int(nn_cfg.get("dataset_id", 101))
-    dataset_name = str(nn_cfg.get("dataset_name", "Dataset101_BraTS"))
-    dirs = prepare_dataset_dirs(nnunet_raw_path, dataset_id, dataset_name)
+    splits: dict[str, Path] = {}
+    for name in SPLIT_NAMES:
+        splits[name] = splits_base / name
 
     return {
         "root": root,
         "input_log": s1["output_log"],
         "input_volumes_dir": s1["volumes_dir"],
         "input_masks_dir": s1["masks_dir"],
-        "output_log": _p("output_log"),
-        "audit_report": _p("audit_report"),
-        "nnunet_raw": nnunet_raw_path,
-        "dataset_folder": dirs["dataset_folder"],
-        "images_tr": dirs["images_tr"],
-        "labels_tr": dirs["labels_tr"],
-        "dataset_json": dirs["dataset_json"],
-        "dataset_id": dataset_id,
-        "dataset_name": dataset_name,
+        "output_log": _p("output_log", "output/stage_2/processing_log.csv"),
+        "audit_report": _p("audit_report", "output/stage_2/reporte_auditoria_stage_2.md"),
+        "split_manifest": _p("split_manifest", "output/stage_2/dataset_split.json"),
+        "splits_dir": splits_base,
+        "splits": splits,
+        "test_ground_truth_dir": _p(
+            "test_ground_truth_dir", "output/stage_2/test_ground_truth"
+        ),
     }
 
 
@@ -80,176 +102,116 @@ def load_approved_case_ids(stage1_log: Path) -> list[str]:
     return sorted(approved)
 
 
-def verify_stage_2_output(
+def resolve_seed(config: dict) -> int:
+    cfg = config.get("stage_2", {})
+    if cfg.get("seed") is not None:
+        return int(cfg["seed"])
+    return int(config.get("project", {}).get("seed", 42))
+
+
+def resolve_ratios(config: dict) -> dict[str, float]:
+    cfg = config.get("stage_2", {})
+    validate_stage2_config(cfg)
+    ratios = cfg.get("ratios")
+    if not ratios:
+        return dict(DEFAULT_RATIOS)
+    if "train" not in ratios or "test" not in ratios:
+        raise ValueError("stage_2.ratios debe definir solo train y test.")
+    return {"train": float(ratios["train"]), "test": float(ratios["test"])}
+
+
+def copy_case_to_split_bundle(
     case_id: str,
-    images_tr: Path,
-    labels_tr: Path,
-    modalities: list[str] | None = None,
-) -> tuple[str, str, dict]:
-    """Gate Stage 2: N canales + label, geometría melliza, seg {0,1,2,3}."""
-    modalities = modalities or ["t1", "t1ce", "t2", "flair"]
-    n_ch = len(modalities)
-    paths = nnunet_paths_for_case(case_id, images_tr, labels_tr, n_ch)
-
-    missing = [name for name, path in paths.items() if not path.exists()]
-    if missing:
-        return (
-            STATUS_FAIL,
-            "missing_nifti",
-            {"missing": missing, "paths": {k: str(v) for k, v in paths.items()}},
-        )
-
-    try:
-        images = {name: read_nifti(path) for name, path in paths.items()}
-    except Exception as exc:  # noqa: BLE001
-        return STATUS_FAIL, "read_error", {"error": str(exc)}
-
-    ordered = [images[f"channel_{i}"] for i in range(n_ch)] + [images["label"]]
-    ok, msg = geometries_match(ordered)
-    if not ok:
-        return STATUS_FAIL, "geometry_mismatch", {"details": msg}
-
-    seg = images["label"]
-    if seg.GetPixelID() != sitk.sitkUInt8:
-        return STATUS_FAIL, "seg_dtype", {"pixel_id": int(seg.GetPixelID())}
-
-    seg_arr = np.asarray(sitk.GetArrayFromImage(seg))
-    if not validate_seg(seg_arr):
-        invalid = sorted(invalid_seg_values(seg_arr))
-        return STATUS_FAIL, "corrupt_seg", {"invalid_values": invalid}
-
-    for i in range(n_ch):
-        img = images[f"channel_{i}"]
-        if img.GetPixelID() not in (sitk.sitkFloat32, sitk.sitkFloat64):
-            return (
-                STATUS_FAIL,
-                "modality_dtype",
-                {"channel": i, "pixel_id": int(img.GetPixelID())},
-            )
-
-    ref = images["channel_0"]
-    return (
-        STATUS_OK,
-        "",
-        {
-            "case_id": nnunet_case_id(case_id),
-            "n_channels": n_ch,
-            "geometry": geometry_tuple(ref),
-            "paths": {k: str(v) for k, v in paths.items()},
-        },
-    )
-
-
-def process_one_case(
-    case_id: str,
+    split: str,
     *,
     input_volumes_dir: Path,
     input_masks_dir: Path,
-    images_tr: Path,
-    labels_tr: Path,
+    split_root: Path,
     modalities: list[str],
     label_file: str,
-) -> dict:
-    cid = nnunet_case_id(case_id)
-    record: dict = {
-        "case_id": cid,
-        "status": STATUS_FAIL,
-        "reason": "",
-        "details": "",
-        "n_channels": len(modalities),
-        "path_label": "",
-    }
-    for i, mod in enumerate(modalities):
-        record[f"path_{mod}"] = ""
-        record[f"channel_{i}"] = mod
+) -> tuple[str, str, dict[str, str]]:
+    """Copia modalidades + seg de Stage 1 al bundle images*/labels* del split."""
+    dirs = split_image_label_dirs(split_root, split)
+    ensure_dir(dirs["images"])
+    ensure_dir(dirs["labels"])
 
-    try:
-        in_paths = output_paths_for_case(
-            case_id, input_volumes_dir, input_masks_dir, modalities, label_file
-        )
-        missing = [k for k, p in in_paths.items() if not p.exists()]
-        if missing:
-            record["reason"] = "missing_stage1_input"
-            record["details"] = f"Faltan: {missing}"
-            return record
-
-        out_paths = nnunet_paths_for_case(cid, images_tr, labels_tr, len(modalities))
-
-        for i, mod in enumerate(modalities):
-            dst = copy_nifti(in_paths[mod], out_paths[f"channel_{i}"])
-            record[f"path_{mod}"] = str(dst)
-
-        dst_label = copy_nifti(in_paths[label_file], out_paths["label"])
-        record["path_label"] = str(dst_label)
-
-        status, reason, details = verify_stage_2_output(
-            cid, images_tr, labels_tr, modalities
-        )
-        record["status"] = status
-        record["reason"] = reason
-        if status == STATUS_OK:
-            record["details"] = "nnU-Net packaging OK"
-            geom = details.get("geometry") or {}
-            size = geom.get("size")
-            if size:
-                record["details"] = f"nnU-Net OK size={size}"
-        else:
-            record["details"] = str(details)
-        return record
-
-    except Exception as exc:  # noqa: BLE001
-        record["reason"] = "exception"
-        record["details"] = str(exc)
-        return record
-
-
-def write_stage2_dataset_json(
-    config: dict,
-    paths: dict[str, Path],
-    num_training: int,
-    modalities: list[str],
-) -> Path:
-    labels_cfg = config.get("labels", {}).get("classes", {
-        "background": 0,
-        "edema": 1,
-        "non_enhancing": 2,
-        "enhancing": 3,
-    })
-    project = config.get("project", {})
-    meta = build_dataset_json(
-        modalities=modalities,
-        labels=labels_cfg,
-        num_training=num_training,
-        dataset_name=str(paths["dataset_name"]),
-        release=str(project.get("edition", "1.0")),
+    in_paths = output_paths_for_case(
+        case_id, input_volumes_dir, input_masks_dir, modalities, label_file
     )
-    return write_dataset_json(paths["dataset_json"], meta)
+    missing = [k for k, p in in_paths.items() if not p.exists()]
+    if missing:
+        return STATUS_FAIL, "missing_stage1_input", {"missing": missing}
+
+    out_paths: dict[str, str] = {}
+    folder = f"volume_{case_id}"
+    out_vol = dirs["images"] / folder
+    out_mask = dirs["labels"] / folder
+    ensure_dir(out_vol)
+    ensure_dir(out_mask)
+
+    for mod in modalities:
+        dst = out_vol / f"{folder}-{mod}.nii.gz"
+        copy_nifti(in_paths[mod], dst)
+        out_paths[mod] = str(dst)
+
+    dst_seg = out_mask / f"{folder}-{label_file}.nii.gz"
+    copy_nifti(in_paths[label_file], dst_seg)
+    out_paths[label_file] = str(dst_seg)
+
+    return STATUS_OK, "", out_paths
+
+
+def copy_test_ground_truth_flat(
+    case_id: str,
+    *,
+    labels_ts_dir: Path,
+    gt_dir: Path,
+    label_file: str,
+) -> tuple[str, str, str]:
+    """Copia seg del bundle test/labelsTs a test_ground_truth/ (nombre plano)."""
+    folder = f"volume_{case_id}"
+    src = labels_ts_dir / folder / f"{folder}-{label_file}.nii.gz"
+    if not src.exists():
+        return STATUS_FAIL, "missing_seg", ""
+    dst = gt_dir / ground_truth_filename(case_id)
+    copy_nifti(src, dst)
+    return STATUS_OK, "", str(dst)
 
 
 def run_stage_2(config: dict, *, yes: bool = False) -> pd.DataFrame:
-    """Orquesta Stage 2 completo."""
+    """Particiona casos y materializa bundles imágenes+labels por split."""
     paths = stage2_paths(config)
     cfg = config["stage_2"]
-    modalities: list[str] = list(cfg.get("modalities") or config["stage_1"]["modalities"])
     label_file: str = cfg.get("label_file", "seg")
+    modalities: list[str] = list(cfg.get("modalities") or config["stage_1"]["modalities"])
     max_cases = cfg.get("max_cases")
+    seed = resolve_seed(config)
+    ratios = resolve_ratios(config)
 
-    ensure_dir(paths["images_tr"])
-    ensure_dir(paths["labels_tr"])
+    ensure_dir(paths["splits_dir"])
+    for split in SPLIT_NAMES:
+        bundle = split_image_label_dirs(paths["splits"][split], split)
+        ensure_dir(bundle["images"])
+        ensure_dir(bundle["labels"])
+    ensure_dir(paths["test_ground_truth_dir"])
     ensure_dir(paths["output_log"].parent)
 
     case_ids = load_approved_case_ids(paths["input_log"])
     if max_cases is not None:
         case_ids = case_ids[: int(max_cases)]
 
-    print("[*] Stage 2: Conversión a formato nnU-Net v2")
-    print(f"    input volumes: {paths['input_volumes_dir']}")
-    print(f"    input masks:   {paths['input_masks_dir']}")
-    print(f"    dataset:       {paths['dataset_folder']}")
-    print(f"    casos:         {len(case_ids)} (aprobados Stage 1)")
-    print(f"    canales:       {list(enumerate(modalities))} → _0000.._{len(modalities)-1:04d}")
-    print(f"    clases:        Decathlon {{0,1,2,3}} (sin remap)")
-    print(f"    dataset.json:  {paths['dataset_json']}")
+    print("[*] Stage 2: Split Manager (train + test, imágenes con labels)")
+    print(f"    input log:   {paths['input_log']}")
+    print(f"    casos:       {len(case_ids)} (SUCCESS_PREPROCESSED)")
+    print(f"    seed:        {seed}")
+    print(f"    ratios:      {ratios}")
+    print(f"    splits dir:  {paths['splits_dir']}")
+    for split in SPLIT_NAMES:
+        d = split_image_label_dirs(paths["splits"][split], split)
+        print(f"    {split}: images={d['images'].name} labels={d['labels'].name}")
+
+    if not case_ids:
+        raise ValueError("No hay casos aprobados en Stage 1 para particionar")
 
     if not yes:
         answer = input("Continuar? [y/N]: ").strip().lower()
@@ -257,31 +219,155 @@ def run_stage_2(config: dict, *, yes: bool = False) -> pd.DataFrame:
             print("[-] Cancelado por el usuario.")
             return pd.DataFrame()
 
+    manifest = partition_case_ids(case_ids, ratios=ratios, seed=seed)
+    manifest["layout"] = {
+        split: {
+            "images": str(split_image_label_dirs(paths["splits"][split], split)["images"]),
+            "labels": str(split_image_label_dirs(paths["splits"][split], split)["labels"]),
+        }
+        for split in SPLIT_NAMES
+    }
+    write_split_manifest(paths["split_manifest"], manifest)
+
+    split_lookup: dict[str, str] = {}
+    for split_name in SPLIT_NAMES:
+        for cid in manifest[split_name]:
+            split_lookup[cid] = split_name
+
+    test_labels_dir = split_image_label_dirs(paths["splits"]["test"], "test")["labels"]
+
     records: list[dict] = []
     for i, case_id in enumerate(case_ids, start=1):
-        print(f"[{i}/{len(case_ids)}] {case_id} ...", flush=True)
-        rec = process_one_case(
+        split = split_lookup[case_id]
+        record: dict = {
+            "case_id": case_id,
+            "split": split,
+            "status": STATUS_OK,
+            "reason": "",
+            "path_images_dir": "",
+            "path_labels_dir": "",
+            "path_ground_truth": "",
+        }
+
+        status, reason, out_paths = copy_case_to_split_bundle(
             case_id,
+            split,
             input_volumes_dir=paths["input_volumes_dir"],
             input_masks_dir=paths["input_masks_dir"],
-            images_tr=paths["images_tr"],
-            labels_tr=paths["labels_tr"],
+            split_root=paths["splits"][split],
             modalities=modalities,
             label_file=label_file,
         )
-        records.append(rec)
-        flag = "+" if rec["status"] == STATUS_OK else "-"
-        print(f"  [{flag}] {rec['case_id']}: {rec['status']} {rec['reason']}".rstrip())
+        record["status"] = status
+        record["reason"] = reason
+        bundle = split_image_label_dirs(paths["splits"][split], split)
+        record["path_images_dir"] = str(bundle["images"])
+        record["path_labels_dir"] = str(bundle["labels"])
+        if status == STATUS_OK and label_file in out_paths:
+            record["path_seg"] = out_paths[label_file]
+
+        if split == "test" and status == STATUS_OK:
+            gt_status, gt_reason, gt_path = copy_test_ground_truth_flat(
+                case_id,
+                labels_ts_dir=test_labels_dir,
+                gt_dir=paths["test_ground_truth_dir"],
+                label_file=label_file,
+            )
+            if gt_status != STATUS_OK:
+                record["status"] = gt_status
+                record["reason"] = gt_reason
+            record["path_ground_truth"] = gt_path
+
+        records.append(record)
+        if i <= 5 or record["status"] != STATUS_OK:
+            flag = "+" if record["status"] == STATUS_OK else "-"
+            print(f"  [{flag}] {case_id}: {split} {record['reason']}".rstrip())
 
     log_df = pd.DataFrame(records)
     log_df.to_csv(paths["output_log"], index=False)
 
-    n_ok = int((log_df["status"] == STATUS_OK).sum()) if not log_df.empty else 0
-    n_fail = len(log_df) - n_ok
+    ok_disjoint, msg_disjoint = verify_split_disjoint(manifest)
+    ok_counts, msg_counts = verify_split_counts(manifest, len(case_ids))
+    ok_gt, msg_gt, _ = verify_test_ground_truth_dir(manifest, paths["test_ground_truth_dir"])
+    bundle_rows = verify_all_split_bundles(
+        manifest,
+        paths["splits"],
+        modalities=modalities,
+        label_file=label_file,
+    )
+    bundles_ok = all(r["ok"] for r in bundle_rows)
 
-    write_stage2_dataset_json(config, paths, num_training=n_ok, modalities=modalities)
+    print(f"[*] Manifest: {paths['split_manifest']}")
+    print(f"[*] counts:   {manifest['counts']}")
+    print(f"[*] Log:      {paths['output_log']}")
+    gate_ok = ok_disjoint and ok_counts and ok_gt and bundles_ok
+    print(
+        f"[*] Gates:    disjoint={ok_disjoint} counts={ok_counts} "
+        f"bundles={bundles_ok} test_gt={ok_gt}"
+        + (f" ({msg_disjoint or msg_counts or msg_gt})" if not gate_ok else "")
+    )
+    if not gate_ok:
+        print("[!] Advertencia: revisar auditoría Stage 2")
 
-    print(f"[*] Log: {paths['output_log']}")
-    print(f"[*] dataset.json: {paths['dataset_json']} (numTraining={n_ok})")
-    print(f"[*] Resumen: {n_ok} {STATUS_OK}, {n_fail} {STATUS_FAIL}")
     return log_df
+
+
+def split_source_dirs(config: dict, split: str) -> dict[str, Path]:
+    """Directorios images/labels del Stage 2 para un split (entrada Stage 3)."""
+    paths = stage2_paths(config)
+    if split not in paths["splits"]:
+        raise ValueError(f"split desconocido: {split}")
+    return split_image_label_dirs(paths["splits"][split], split)
+
+
+def audit_split_integrity(
+    config: dict,
+) -> tuple[list[dict], dict[str, Path]]:
+    """Checks de integridad para tools/audit_stage_2."""
+    paths = stage2_paths(config)
+    cfg = config.get("stage_2", {})
+    modalities: list[str] = list(cfg.get("modalities") or config["stage_1"]["modalities"])
+    label_file: str = cfg.get("label_file", "seg")
+
+    case_ids = load_approved_case_ids(paths["input_log"])
+    max_cases = cfg.get("max_cases")
+    if max_cases is not None:
+        case_ids = case_ids[: int(max_cases)]
+
+    manifest = load_split_manifest(paths["split_manifest"])
+    rows: list[dict] = []
+
+    ok_d, msg_d = verify_split_disjoint(manifest)
+    rows.append({"check": "disjoint_splits", "ok": ok_d, "detail": msg_d or "OK"})
+
+    ok_c, msg_c = verify_split_counts(manifest, len(case_ids))
+    rows.append({"check": "partition_sum", "ok": ok_c, "detail": msg_c or "OK"})
+
+    for bundle in verify_all_split_bundles(
+        manifest,
+        paths["splits"],
+        modalities=modalities,
+        label_file=label_file,
+    ):
+        rows.append(
+            {
+                "check": bundle["check"],
+                "ok": bundle["ok"],
+                "detail": bundle["detail"],
+                "issues": bundle.get("issues", []),
+            }
+        )
+
+    ok_gt, msg_gt, issues = verify_test_ground_truth_dir(
+        manifest, paths["test_ground_truth_dir"]
+    )
+    rows.append(
+        {
+            "check": "test_ground_truth",
+            "ok": ok_gt,
+            "detail": msg_gt or "OK",
+            "issues": issues,
+        }
+    )
+
+    return rows, paths

@@ -1,11 +1,12 @@
+# Única fuente de verdad del pipeline (ver AGENTS.md).
+# Ajustá project_root si cambiás la carpeta de datos.
+
 project:
   name: brats-glioma-seg
   edition: Medical-Decathlon-Task01-BrainTumour
   seed: 42
 
-# Raíz del proyecto (carpeta que contiene Task01_BrainTumour/, output/)
-# Copiar este archivo a config.yaml y ajustar la ruta.
-project_root: "C:/ruta/a/GLIOMAS CEREBRALES"
+project_root: "C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES"
 
 stage_0:
   decathlon_root: "Task01_BrainTumour"
@@ -46,22 +47,40 @@ stage_1:
     eps: 1.0e-8
   max_cases: null
 
+# Stage 2 = SOLO split train/test (imágenes + labels). NO nnU-Net aquí.
 stage_2:
-  output_log: "output/stage_2/conversion_log.csv"
+  output_log: "output/stage_2/processing_log.csv"
   audit_report: "output/stage_2/reporte_auditoria_stage_2.md"
-  nnunet_raw: "output/stage_2/nnunet_raw"
+  split_manifest: "output/stage_2/dataset_split.json"
+  splits_dir: "output/stage_2/splits"
+  test_ground_truth_dir: "output/stage_2/test_ground_truth"
+  seed: 42
+  ratios:
+    train: 0.85
+    test: 0.15
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
   max_cases: null
 
 stage_3:
-  output_log: "output/stage_3/training_log.csv"
+  output_log: "output/stage_3/conversion_log.csv"
   audit_report: "output/stage_3/reporte_auditoria_stage_3.md"
-  nnunet_raw: "output/stage_2/nnunet_raw"
-  nnunet_preprocessed: "output/stage_3/nnunet_preprocessed"
-  nnunet_results: "output/stage_3/nnunet_results"
+  nnunet_raw: "output/stage_3/nnunet_raw"
+  modalities: [t1, t1ce, t2, flair]
+  label_file: seg
+  max_cases: null
+
+stage_4:
+  output_log: "output/stage_4/training_log.csv"
+  audit_report: "output/stage_4/reporte_auditoria_stage_4.md"
+  nnunet_raw: "output/stage_3/nnunet_raw"
+  nnunet_preprocessed: "output/stage_4/nnunet_preprocessed"
+  nnunet_results: "output/stage_4/nnunet_results"
+  test_predictions: "output/stage_4/test_predictions"
   run_plan_and_preprocess: true
   run_train: true
+  run_predict: false
+  run_eval: false
   verify_dataset_integrity: true
   clean_fingerprint: false
   no_preprocess: false
@@ -98,6 +117,6 @@ nnunet:
   fold: 0
 
 paths:
-  nnunet_raw: output/stage_2/nnunet_raw
-  nnunet_preprocessed: output/stage_3/nnunet_preprocessed
-  nnunet_results: output/stage_3/nnunet_results
+  nnunet_raw: output/stage_3/nnunet_raw
+  nnunet_preprocessed: output/stage_4/nnunet_preprocessed
+  nnunet_results: output/stage_4/nnunet_results

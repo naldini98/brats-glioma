@@ -1,80 +1,71 @@
 # Registro de Experimentos
 
-Última actualización: 28 de julio de 2026  
+Última actualización: 7 de agosto de 2026  
 Proyecto: brats-glioma-seg (Medical Decathlon Task01)  
-Raíz: `C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`
+Raíz datos: ver `project_root` en `config.yaml`
 
 ## Bitácora
 
 | Fecha | Hito | Detalle |
 |-------|------|---------|
-| 2026-07-28 | Stage 3 implementado | plan_and_preprocess + train 3d_fullres fold 0. |
-| 2026-07-28 | Stage 2 completo | 484/484 SUCCESS_CONVERTED. Dataset101_BraTS listo. |
-| 2026-07-28 | Stage 2 implementado | Convert a nnU-Net v2 Dataset101_BraTS. Clases {0,1,2,3}. |
-| 2026-07-23 | Proyecto reubicado | Ruta sin acentos. output/ vacío, regenerar Stage 0. |
-| 2026-07-22 | Stage 1 implementado | RAS, resample 1mm, clip percentil + z-score por modalidad/caso. |
-| 2026-07-17 | Stage 0 completo | 484/484 SUCCESS_GEOMETRIC_APPROVED. |
-| 2026-07-17 | Stage 0 Decathlon | Split 4D, clases {0,1,2,3}, espacio nativo. |
-| - | Stage 3 Train | Implementado; corrida pendiente |
-| - | Stage 4 Eval | Pendiente |
+| 2026-08-07 | Pipeline renumerado | S2 split 85/15, S3 nnU-Net raw, S4 plan/train. Docs + cleanup checklist. |
+| 2026-07-28 | nnU-Net empaquetado | Dataset101_BraTS, clases {0,1,2,3}. |
+| 2026-07-23 | Proyecto reubicado | Ruta sin acentos. |
+| 2026-07-22 | Stage 1 | RAS, 1mm, clip + z-score. |
+| 2026-07-17 | Stage 0 | 484 casos train Decathlon, espacio nativo. |
+| - | Corrida full post-refactor | Pendiente (ver cleanup-checklist.md) |
+| - | Stage 4 eval Dice/HD95 | Pendiente implementación |
 
-## Experimento 000 - Baseline
+> **Nota:** Corridas anteriores con Stage 2 = conversión nnU-Net en `output/stage_2/nnunet_raw/` **no son compatibles** con la numeración actual. Regenerar desde Stage 0 o limpiar `output/` según [cleanup-checklist.md](cleanup-checklist.md).
+
+## Experimento 001 — Baseline (post-refactor, plantilla)
+
+Completar tras la próxima corrida end-to-end.
 
 | Campo | Valor |
 |-------|-------|
-| Dataset | Task01_BrainTumour (484 train) |
-| Stage 0 | 484 SUCCESS_GEOMETRIC_APPROVED |
-| Stage 1 | 484 SUCCESS_PREPROCESSED |
-| Stage 2 | 484 SUCCESS_CONVERTED |
+| Dataset | Task01_BrainTumour (~484 train con labels) |
+| Split Stage 2 | train 85% / test 15%, seed 42 |
 | Normalización | clip [0.5, 99.5] + z-score por modalidad/caso |
-| Spacing | 1.0 mm isotrópico |
-| Orientación | RAS |
+| Spacing | 1.0 mm isotrópico, RAS |
 | Clases | {0, 1, 2, 3} |
-| nnU-Net dataset | Dataset101_BraTS (id 101) |
-| Canales nnU-Net | 0000=t1, 0001=t1ce, 0002=t2, 0003=flair |
+| nnU-Net | Dataset101_BraTS, 3d_fullres |
+| Canales | 0000=t1, 0001=t1ce, 0002=t2, 0003=flair |
+| CV entrenamiento | 5-fold nnU-Net sobre `imagesTr` (Stage 4) |
 
-### Stage 1
+### Comandos
 
-| Métrica | Valor |
-|---------|-------|
-| Casos procesados | 484 |
-| SUCCESS_PREPROCESSED | 484 |
-| FAILED | 0 |
+```bash
+python main.py --stage stage_0 --yes
+python main.py --stage stage_1 --yes
+python main.py --stage stage_2 --yes
+python main.py --stage stage_3 --yes
+python main.py --stage stage_4 --yes
+```
 
-Comando: `python main.py --stage stage_1 --yes`
+### Rutas clave (actual)
 
-### Stage 2
+| Stage | Artefacto principal |
+|-------|---------------------|
+| 2 | `output/stage_2/splits/`, `dataset_split.json` |
+| 3 | `output/stage_3/nnunet_raw/Dataset101_BraTS/` |
+| 4 | `output/stage_4/nnunet_results/` |
+| Test GT | `output/stage_2/test_ground_truth/` |
 
-| Métrica | Valor |
-|---------|-------|
-| Casos convertidos | 484 |
-| SUCCESS_CONVERTED | 484 |
-| FAILED | 0 |
-| dataset.json numTraining | 484 |
-| Auditoría | 484 OK, 0 FAILED |
+## Experimento 000 — Histórico (pre-refactor)
 
-Comando: `python main.py --stage stage_2 --yes`  
-Auditoría: `python tools/audit_stage_2.py`  
-Dataset: `output/stage_2/nnunet_raw/Dataset101_BraTS/`
+Referencia de corrida antigua (Stage 2 = convert nnU-Net, todo en imagesTr sin split test).
 
-### Stage 3 (completar tras corrida)
-
-| Métrica | Valor |
-|---------|-------|
-| plan_and_preprocess | - |
-| train fold 0 | - |
-| device | - |
-| checkpoint_final | - |
-
-Comando: `python main.py --stage stage_3 --yes`  
-Solo plan: `python scripts/train_nnunet.py --plan-only --yes`  
-Auditoría: `python tools/audit_stage_3.py`
+| Campo | Valor |
+|-------|-------|
+| Stage 0–1 | 484/484 OK |
+| Stage 2 (viejo) | 484 → `output/stage_2/nnunet_raw/` |
+| Stage 3 (viejo) | plan/train en `output/stage_3/` |
 
 ## Notas
 
-- MRI: no se usa escalado [0,1] ni ventana HU (a diferencia del pipeline TAC nódulos).
+- MRI: no escala [0,1] ni ventana HU.
 - seg siempre nearest en resample.
-- Stage 2 no remapea clases a BraTS clásico {0,1,2,4}.
-- Stage 2 no altera geometría/intensidades: solo copia + dataset.json.
-- Stage 3 requiere GPU (CUDA) para ser práctico; CPU es solo depuración.
-- Splits por case_id (BRATS_XXX); folds 5-CV los genera nnU-Net en Stage 3.
+- Sin remap a BraTS clásico {0,1,2,4}.
+- Stage 4 requiere GPU para 3d_fullres en la práctica.
+- Test Decathlon (`imagesTs`) no se usa; test = split interno 15% con labels.

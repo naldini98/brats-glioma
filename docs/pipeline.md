@@ -1,241 +1,169 @@
 # Pipeline BraTS Glioma Segmentation
 
-Última actualización: 28 de julio de 2026  
+Última actualización: 7 de agosto de 2026  
 Proyecto: brats-glioma-seg (Medical Decathlon Task01_BrainTumour)  
-Raíz del proyecto: `C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`  
-Estado: Stages 0–3 implementados. Stage 4 (eval) pendiente.
+Estado: Stages 0–4 implementados; evaluación ciega (Dice/HD95) en Stage 4 pendiente.
 
 ## Flujo general
 
 ```
-Task01_BrainTumour/  (materia prima Decathlon)
+Task01_BrainTumour/  (solo imagesTr + labelsTr; imagesTs Decathlon ignorado)
     |
-    v  Stage 0: volúmenes NIfTI mellizos (espacio nativo)
+    v  Stage 0: NIfTI por modalidad (espacio nativo)
 output/stage_0/
     |
     v  Stage 1: RAS + 1mm + clip/z-score
 output/stage_1/
     |
-    v  Stage 2: Convert nnU-Net v2
-output/stage_2/nnunet_raw/Dataset101_BraTS/
+    v  Stage 2: split train (85%) / test (15%), imágenes + labels emparejados
+output/stage_2/splits/ + test_ground_truth/
     |
-    v  Stage 3: Plan/preprocess + Train nnU-Net
-output/stage_3/nnunet_preprocessed/ + output/stage_3/nnunet_results/
+    v  Stage 3: empaquetado nnU-Net v2
+output/stage_3/nnunet_raw/Dataset101_BraTS/
     |
-    v  Stage 4: Eval Dice (pendiente)
+    v  Stage 4: plan_and_preprocess + train (+ predict/eval opcional)
+output/stage_4/nnunet_preprocessed/ + nnunet_results/
 ```
+
+**Validación durante entrenamiento:** nnU-Net hace **5-fold CV** sobre todo `imagesTr`/`labelsTr` (no hay carpeta val en Stage 2).  
+**Test ciego:** nunca entra en `labelsTr` del raw nnU-Net; GT en `output/stage_2/test_ground_truth/`.
+
+Corrida limpia: [cleanup-checklist.md](cleanup-checklist.md).
+
+---
 
 ## Stage 0: Generación de Volúmenes y Máscaras Base
 
 Comando: `python main.py --stage stage_0 --yes`
 
-- Entrada: Task01_BrainTumour (4D + máscara 3D)
-- Split 4 canales → t1, t1ce, t2, flair + seg
-- Espacio NATIVO (sin RAS, resample ni normalización)
+- Entrada: Task01 `imagesTr` + `labelsTr` vía `dataset.json`
+- Split 4D → t1, t1ce, t2, flair + seg
+- Espacio **NATIVO** (sin RAS, resample ni normalización)
 - Clases seg: {0, 1, 2, 3} (Decathlon)
-- Gate: SUCCESS_GEOMETRIC_APPROVED
+- Gate: `SUCCESS_GEOMETRIC_APPROVED`
 - Auditoría: `python tools/audit_stage_0.py`
+
+| Salida | Ruta |
+|--------|------|
+| Volúmenes | `output/stage_0/01_nifti_volumes/volume_{case}/` |
+| Máscaras | `output/stage_0/02_nifti_masks/volume_{case}/` |
+| Log | `output/stage_0/processing_log.csv` |
+
+---
 
 ## Stage 1: Preprocesamiento Espacial e Intensidad
 
-Comando: `python main.py --stage stage_1 --yes`
+Comando: `python main.py --stage stage_1 --yes` · alias `preprocess`
 
-Entrada: solo casos SUCCESS_GEOMETRIC_APPROVED de `output/stage_0/`.
+Entrada: casos `SUCCESS_GEOMETRIC_APPROVED` en log Stage 0.
 
-### Pasos por paciente
+| Paso | Qué hace |
+|------|----------|
+| RAS | Convención anatómica |
+| Resample 1 mm | Spacing isotrópico |
+| MRI linear / seg nearest | |
+| Clip [0.5, 99.5] + z-score por modalidad/caso | Sin escala [0,1] |
+| Gate | Mellizos + spacing ~1mm + seg {0,1,2,3} |
 
-| Paso | Qué hace | Por qué |
-|------|----------|---------|
-| 1. Reorientación RAS | Alinea ejes anatómicos | Convención estándar 3D / nnU-Net |
-| 2. Resample 1 mm | Spacing isotrópico | Homogeneizar resolución entre casos |
-| 3. Interpolación | MRI: linear, seg: nearest | Intensidades vs etiquetas discretas |
-| 4. Normalización | Clip [p0.5, p99.5] + z-score por modalidad/caso | MRI no tiene escala absoluta (no HU) |
-| 5. Gate | verify_stage_1_output | Mellizos + spacing 1mm + seg {0,1,2,3} |
-
-### Normalización (sin escalado [0,1])
-
-A diferencia del pipeline de nódulos pulmonares (TAC):
-
-- No hay ventana HU fija ni escala [0,1].
-- Por cada paciente y cada modalidad por separado:
-  1. Máscara cerebral desde FLAIR (voxels > 0)
-  2. Clip a percentiles 0.5 y 99.5 (robusto a outliers)
-  3. Z-score: (x - μ) / σ sobre voxeles cerebrales
-
-Resultado: media ~0, desvío ~1 por modalidad. Compatible con nnU-Net.
-
-### Salidas Stage 1
-
-| Artefacto | Ruta |
-|-----------|------|
-| Volúmenes normalizados | output/stage_1/01_nifti_volumes/volume_{case_id}/ |
-| Máscaras resampleadas | output/stage_1/02_nifti_masks/volume_{case_id}/ |
-| Log | output/stage_1/preprocessing_log.csv |
-| Auditoría | output/stage_1/reporte_auditoria_stage_1.md |
-
-Estado exitoso: SUCCESS_PREPROCESSED
-
+Estado exitoso: `SUCCESS_PREPROCESSED`  
 Auditoría: `python tools/audit_stage_1.py`
 
-### Configuración (config.yaml → stage_1)
+Módulos: `src/data/spatial_preprocess.py`, `intensity_norm.py`, `stage_1.py`
 
-```yaml
-stage_1:
-  orientation: RAS
-  target_spacing: [1.0, 1.0, 1.0]
-  reference_modality: t1
-  normalization:
-    method: percentile_clip_zscore
-    percentile_low: 0.5
-    percentile_high: 99.5
-    mask_source: flair
-```
+---
 
-### Módulos
+## Stage 2: Split Manager (train / test)
 
-- `src/data/spatial_preprocess.py` — RAS + resample
-- `src/data/intensity_norm.py` — clip + z-score
-- `src/data/stage_1.py` — orquestación y gate
-- `tools/audit_stage_1.py` — auditoría post-hoc
+Comando: `python main.py --stage stage_2 --yes`
 
-## Stage 2: Conversión a formato nnU-Net v2
+Entrada: `output/stage_1/` (casos preprocesados).
 
-Comando: `python main.py --stage stage_2 --yes`  
-Alias: `python scripts/convert_to_nnunet.py --yes`
+| Partición | ~% | Carpetas (bajo `output/stage_2/splits/`) |
+|-----------|-----|------------------------------------------|
+| **train** | 85 | `train/imagesTr/` + `train/labelsTr/` |
+| **test** | 15 | `test/imagesTs/` + `test/labelsTs/` |
 
-Entrada: solo casos SUCCESS_PREPROCESSED de `output/stage_1/`.
+Además:
 
-### Qué hace
+- `output/stage_2/dataset_split.json` — listas `train`, `test`, `counts`, `layout`
+- `output/stage_2/test_ground_truth/` — máscaras test en nombre plano (`BRATS_XXX.nii.gz`) para eval Stage 4
+- `output/stage_2/processing_log.csv`
 
-| Paso | Qué hace | Por qué |
-|------|----------|---------|
-| 1. Filtrar casos | Lee preprocessing_log Stage 1 | Solo casos aprobados |
-| 2. Copiar canales | `volume_*-{mod}.nii.gz` → `{case}_000X.nii.gz` | Naming oficial nnU-Net |
-| 3. Copiar label | `volume_*-seg.nii.gz` → `{case}.nii.gz` | Una máscara por caso |
-| 4. dataset.json | channel_names + labels + numTraining | Metadatos nnU-Net v2 |
-| 5. Gate | verify_stage_2_output | 4 canales + label, geometría melliza, clases {0,1,2,3} |
-
-**No altera** geometría ni intensidades: solo empaqueta. Sin remap a BraTS clásico `{0,1,2,4}`.
-
-### Naming nnU-Net (orden de canales)
-
-| Canal | Modalidad | Archivo |
-|-------|-----------|---------|
-| `_0000` | t1 | `BRATS_001_0000.nii.gz` |
-| `_0001` | t1ce | `BRATS_001_0001.nii.gz` |
-| `_0002` | t2 | `BRATS_001_0002.nii.gz` |
-| `_0003` | flair | `BRATS_001_0003.nii.gz` |
-| label | seg | `labelsTr/BRATS_001.nii.gz` |
-
-### Salidas Stage 2
-
-| Artefacto | Ruta |
-|-----------|------|
-| Dataset nnU-Net | `output/stage_2/nnunet_raw/Dataset101_BraTS/` |
-| Imágenes | `.../imagesTr/` |
-| Etiquetas | `.../labelsTr/` |
-| Metadatos | `.../dataset.json` |
-| Log | `output/stage_2/conversion_log.csv` |
-| Auditoría | `output/stage_2/reporte_auditoria_stage_2.md` |
-
-Estado exitoso: SUCCESS_CONVERTED
-
+Estado exitoso: `SUCCESS_SPLIT`  
 Auditoría: `python tools/audit_stage_2.py`
 
-### Configuración (config.yaml → stage_2 / nnunet)
+Módulos: `src/data/dataset_split.py`, `src/data/stage_2.py`
+
+Config ejemplo:
 
 ```yaml
 stage_2:
-  nnunet_raw: "output/stage_2/nnunet_raw"
-  modalities: [t1, t1ce, t2, flair]
-  label_file: seg
-
-nnunet:
-  dataset_id: 101
-  dataset_name: Dataset101_BraTS
-  configuration: 3d_fullres
-  fold: 0
+  splits_dir: "output/stage_2/splits"
+  split_manifest: "output/stage_2/dataset_split.json"
+  test_ground_truth_dir: "output/stage_2/test_ground_truth"
+  ratios:
+    train: 0.85
+    test: 0.15
+  seed: 42
 ```
 
-### Módulos
+---
 
-- `src/data/nnunet_convert.py` — naming, dataset.json, copia NIfTI
-- `src/data/stage_2.py` — orquestación y gate
-- `scripts/convert_to_nnunet.py` — wrapper CLI
-- `tools/audit_stage_2.py` — auditoría post-hoc
+## Stage 3: Conversión nnU-Net v2
 
-### Siguiente paso
+Comando: `python main.py --stage stage_3 --yes` · alias `convert`  
+Wrapper: `python scripts/convert_to_nnunet.py --yes`
 
-Stage 3: `python main.py --stage stage_3 --yes`
+Entrada: bundles Stage 2 (`splits/train`, `splits/test`).
 
-## Stage 3: Plan/preprocess + Train (nnU-Net v2)
+| Origen | Destino nnU-Net |
+|--------|-----------------|
+| train (images + labels) | `imagesTr/` + `labelsTr/` |
+| test (solo imágenes) | `imagesTs/` |
 
-Comando: `python main.py --stage stage_3 --yes`  
-Aliases: `python main.py --stage train --yes` · `python scripts/train_nnunet.py --yes`
+Salida: `output/stage_3/nnunet_raw/Dataset101_BraTS/` + `dataset.json` (`numTraining` = casos train).
 
-Entrada: `output/stage_2/nnunet_raw/Dataset101_BraTS/` (Stage 2 completo).
+Naming canales: `_0000`=t1, `_0001`=t1ce, `_0002`=t2, `_0003`=flair.
 
-### Qué hace (2 pasos)
-
-| Paso | Comando nnU-Net | Qué hace |
-|------|-----------------|----------|
-| 1. Plan + preprocess | `nnUNetv2_plan_and_preprocess -d 101` | Fingerprint del dataset, planes (patch/batch/spacing), preprocesado interno nnU-Net |
-| 2. Train | `nnUNetv2_train 101 3d_fullres 0` | Entrena U-Net 3D full-res en fold 0 (5-fold CV); ~1000 epochs por defecto |
-
-Stage 3 **no** reescribe Stage 1/2: nnU-Net aplica su propio preprocesado encima del raw empaquetado.
-
-### Variables de entorno (seteadas por el stage)
-
-| Variable | Ruta (bajo project_root) |
-|----------|--------------------------|
-| `nnUNet_raw` | `output/stage_2/nnunet_raw` |
-| `nnUNet_preprocessed` | `output/stage_3/nnunet_preprocessed` |
-| `nnUNet_results` | `output/stage_3/nnunet_results` |
-
-### Salidas Stage 3
-
-| Artefacto | Ruta |
-|-----------|------|
-| Planes + datos preprocesados | `output/stage_3/nnunet_preprocessed/Dataset101_BraTS/` |
-| Checkpoints | `output/stage_3/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/` |
-| Log | `output/stage_3/training_log.csv` |
-| Auditoría | `output/stage_3/reporte_auditoria_stage_3.md` |
-
-Estados: `SUCCESS_PLANNED` (paso 1) · `SUCCESS_TRAINED` (paso 2) · `FAILED`
-
+Estado exitoso: `SUCCESS_CONVERTED`  
 Auditoría: `python tools/audit_stage_3.py`
 
-### Configuración clave (`stage_3`)
+Módulos: `src/data/nnunet_convert.py`, `src/data/stage_3.py`
 
-```yaml
-stage_3:
-  nnunet_raw: "output/stage_2/nnunet_raw"
-  nnunet_preprocessed: "output/stage_3/nnunet_preprocessed"
-  nnunet_results: "output/stage_3/nnunet_results"
-  run_plan_and_preprocess: true
-  run_train: true
-  configuration: 3d_fullres
-  folds: [0]          # o all / [0,1,2,3,4]
-  device: auto        # cuda | cpu | mps
-  np: 2
-  continue_training: false
-```
+---
+
+## Stage 4: Plan, preprocess y train (nnU-Net v2)
+
+Comando: `python main.py --stage stage_4 --yes` · alias `train`  
+Wrapper: `python scripts/train_nnunet.py --yes`
+
+Entrada: `output/stage_3/nnunet_raw/Dataset101_BraTS/`.
+
+| Paso | CLI |
+|------|-----|
+| Plan + preprocess | `nnUNetv2_plan_and_preprocess -d 101` |
+| Train | `nnUNetv2_train 101 3d_fullres {fold}` |
+
+Variables de entorno (seteadas por el stage):
+
+| Variable | Ruta típica |
+|----------|-------------|
+| `nnUNet_raw` | `output/stage_3/nnunet_raw` |
+| `nnUNet_preprocessed` | `output/stage_4/nnunet_preprocessed` |
+| `nnUNet_results` | `output/stage_4/nnunet_results` |
+
+Salidas: checkpoints en `.../nnUNetTrainer__nnUNetPlans__3d_fullres/fold_X/`  
+Log: `output/stage_4/training_log.csv`  
+Auditoría: `python tools/audit_stage_4.py`
+
+Opcional (`config stage_4`): `run_predict`, `run_eval` — eval Dice/HD95 vs `test_ground_truth` **pendiente** (`src/eval/blind_eval.py`).
 
 Solo plan: `python scripts/train_nnunet.py --plan-only --yes`  
-Solo train (si ya hay planes): `python scripts/train_nnunet.py --train-only --yes`
+Solo train: `python scripts/train_nnunet.py --train-only --yes`
 
-### Módulos
+Módulos: `src/models/nnunet_env.py`, `src/models/stage_4.py`
 
-- `src/models/nnunet_env.py` — env vars, device, CLI
-- `src/models/stage_3.py` — orquestación y gates
-- `scripts/train_nnunet.py` — wrapper CLI
-- `tools/audit_stage_3.py` — auditoría post-hoc
-
-### Notas prácticas
-
-- **GPU recomendada.** Sin CUDA el train en CPU es impráctico para BraTS 3D.
-- Default nnU-Net: ~1000 epochs/fold; fold 0 basta para baseline.
-- Para retomar: `continue_training: true` (flag `--c`).
+---
 
 ## Clases y subregiones (Decathlon)
 
@@ -246,38 +174,42 @@ Solo train (si ya hay planes): `python scripts/train_nnunet.py --train-only --ye
 | 2 | non-enhancing |
 | 3 | enhancing |
 
-- WT: [1, 2, 3]
-- TC: [2, 3]
-- ET: [3]
+WT: [1,2,3] · TC: [2,3] · ET: [3]
+
+---
 
 ## Estructura en disco
 
 ```
-C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES/
-├── Task01_BrainTumour/          # materia prima Decathlon
-├── brats-glioma-seg/            # código + config.yaml
+{project_root}/
+├── Task01_BrainTumour/
+├── brats-glioma-seg/          # repo + config.yaml
 └── output/
     ├── stage_0/
     ├── stage_1/
     ├── stage_2/
-    │   └── nnunet_raw/
-    │       └── Dataset101_BraTS/  # Stage 2 (formato nnU-Net)
-    └── stage_3/
-        ├── training_log.csv
-        ├── nnunet_preprocessed/   # Stage 3 (plan/preprocess nnU-Net)
-        └── nnunet_results/        # Stage 3 (checkpoints)
+    │   ├── splits/train/…
+    │   ├── splits/test/…
+    │   ├── dataset_split.json
+    │   └── test_ground_truth/
+    ├── stage_3/
+    │   └── nnunet_raw/Dataset101_BraTS/
+    └── stage_4/
+        ├── nnunet_preprocessed/
+        ├── nnunet_results/
+        └── test_predictions/
 ```
 
-`stage_*` paths se resuelven bajo `project_root`.
+Rutas `stage_*` en `config.yaml` se resuelven bajo `project_root`.
+
+---
 
 ## Historial
 
 | Fecha | Cambio |
 |-------|--------|
-| 2026-08-06 | Todas las salidas bajo `output/` (Stage 3: preprocessed + results en `output/stage_3/`). |
-| 2026-08-06 | Stage 2: salida nnU-Net bajo `output/stage_2/nnunet_raw/`. |
-| 2026-07-28 | Stage 3: plan/preprocess + train nnU-Net v2 (Dataset101, 3d_fullres). |
-| 2026-07-28 | Stage 2: conversión a nnU-Net v2 (Dataset101_BraTS), clases Decathlon. |
-| 2026-07-23 | Proyecto movido a ruta sin acentos. write_nifti con verificación read-after-write. |
-| 2026-07-22 | Stage 1: RAS + 1mm + clip/z-score por modalidad/caso. |
-| 2026-07-17 | Stage 0: Decathlon 4D → NIfTI mellizos nativos. |
+| 2026-08-07 | Stage 2 = split train/test; Stage 3 = nnU-Net convert; Stage 4 = plan/train. |
+| 2026-08-06 | Salidas bajo `output/` por stage. |
+| 2026-07-28 | Conversión nnU-Net v2 Dataset101 (clases Decathlon). |
+| 2026-07-22 | Stage 1 RAS + 1mm + z-score. |
+| 2026-07-17 | Stage 0 Decathlon 4D → NIfTI nativos. |

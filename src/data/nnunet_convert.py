@@ -117,14 +117,29 @@ def nnunet_paths_for_case(
     return paths
 
 
+def nnunet_paths_for_case_ts(
+    case_id: str,
+    images_ts: Path,
+    n_channels: int,
+    file_ending: str = ".nii.gz",
+) -> dict[str, Path]:
+    """Rutas destino nnU-Net imagesTs (sin labels)."""
+    return {
+        f"channel_{i}": images_ts / channel_filename(case_id, i, file_ending)
+        for i in range(n_channels)
+    }
+
+
 def prepare_dataset_dirs(nnunet_raw: Path, dataset_id: int, dataset_name: str) -> dict[str, Path]:
-    """Crea DatasetXXX/imagesTr y labelsTr."""
+    """Crea DatasetXXX/imagesTr, labelsTr e imagesTs."""
     folder = ensure_dir(nnunet_raw / dataset_folder_name(dataset_id, dataset_name))
     images_tr = ensure_dir(folder / "imagesTr")
     labels_tr = ensure_dir(folder / "labelsTr")
+    images_ts = ensure_dir(folder / "imagesTs")
     return {
         "dataset_folder": folder,
         "images_tr": images_tr,
         "labels_tr": labels_tr,
+        "images_ts": images_ts,
         "dataset_json": folder / "dataset.json",
     }
