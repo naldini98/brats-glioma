@@ -1,9 +1,11 @@
 # Pipeline BraTS Glioma Segmentation
 
-Última actualización: 28 de julio de 2026  
+Última actualización: 6 de agosto de 2026  
 Proyecto: brats-glioma-seg (Medical Decathlon Task01_BrainTumour)  
-Raíz del proyecto: `C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`  
+Raíz del proyecto: valor de `project_root` en `config.yaml` (escritorio GPU: `X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`)  
 Estado: Stages 0–3 implementados. Stage 4 (eval) pendiente.
+
+Setup del entorno Conda en disco Z: [setup-desktop.md](setup-desktop.md).
 
 ## Flujo general
 
@@ -17,10 +19,10 @@ output/stage_0/
 output/stage_1/
     |
     v  Stage 2: Convert nnU-Net v2
-data/nnunet_raw/Dataset101_BraTS/
+output/nnunet_raw/Dataset101_BraTS/
     |
     v  Stage 3: Plan/preprocess + Train nnU-Net
-data/nnunet_preprocessed/ + data/nnunet_results/
+output/nnunet_preprocessed/ + output/nnunet_results/
     |
     v  Stage 4: Eval Dice (pendiente)
 ```
@@ -131,12 +133,24 @@ Entrada: solo casos SUCCESS_PREPROCESSED de `output/stage_1/`.
 
 | Artefacto | Ruta |
 |-----------|------|
-| Dataset nnU-Net | `data/nnunet_raw/Dataset101_BraTS/` |
-| Imágenes | `.../imagesTr/` |
-| Etiquetas | `.../labelsTr/` |
-| Metadatos | `.../dataset.json` |
-| Log | `output/stage_2/conversion_log.csv` |
+| Dataset nnU-Net | `output/nnunet_raw/Dataset101_BraTS/` |
+| Imágenes **training** | `.../imagesTr/` (`{case}_0000`…`0003.nii.gz`) |
+| Etiquetas **training** | `.../labelsTr/` (`{case}.nii.gz`) |
+| Imágenes **test** | `.../imagesTs/` (`{case}_0000`…`0003`, sin labels) |
+| Metadatos | `.../dataset.json` (`numTraining`, `numTest`) |
+| Log train | `output/stage_2/conversion_log.csv` |
+| Log test | `output/stage_2/test_conversion_log.csv` |
 | Auditoría | `output/stage_2/reporte_auditoria_stage_2.md` |
+
+**¿Dónde está `imagesTs`?**  
+Con `process_test: true` (Stages 0–1), cada stage procesa **train y test** con la **misma cadena**:
+
+- **Train:** `imagesTr`/`labelsTr` → `output/stage_0` → `output/stage_1` → nnU-Net `imagesTr`/`labelsTr`
+- **Test:** `imagesTs` → `output/stage_0_test` → `output/stage_1_test` → nnU-Net `imagesTs`
+
+Stage 2 **solo copia/empaqueta** (no re-preprocesa). `numTraining` / `numTest` en `dataset.json`.
+
+**Literatura / buenas prácticas:** train y test deben compartir **idéntico** preprocesamiento (mismos pasos e hiperparámetros). El entrenamiento nnU-Net usa labels en train; test sirve para **inferencia / evaluación externa** (sin labels públicas en Decathlon).
 
 Estado exitoso: SUCCESS_CONVERTED
 
@@ -146,7 +160,7 @@ Auditoría: `python tools/audit_stage_2.py`
 
 ```yaml
 stage_2:
-  nnunet_raw: "data/nnunet_raw"
+  nnunet_raw: "output/nnunet_raw"
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
 
@@ -173,7 +187,7 @@ Stage 3: `python main.py --stage stage_3 --yes`
 Comando: `python main.py --stage stage_3 --yes`  
 Aliases: `python main.py --stage train --yes` · `python scripts/train_nnunet.py --yes`
 
-Entrada: `data/nnunet_raw/Dataset101_BraTS/` (Stage 2 completo).
+Entrada: `output/nnunet_raw/Dataset101_BraTS/` (Stage 2 completo).
 
 ### Qué hace (2 pasos)
 
@@ -188,16 +202,16 @@ Stage 3 **no** reescribe Stage 1/2: nnU-Net aplica su propio preprocesado encima
 
 | Variable | Ruta (bajo project_root) |
 |----------|--------------------------|
-| `nnUNet_raw` | `data/nnunet_raw` |
-| `nnUNet_preprocessed` | `data/nnunet_preprocessed` |
-| `nnUNet_results` | `data/nnunet_results` |
+| `nnUNet_raw` | `output/nnunet_raw` |
+| `nnUNet_preprocessed` | `output/nnunet_preprocessed` |
+| `nnUNet_results` | `output/nnunet_results` |
 
 ### Salidas Stage 3
 
 | Artefacto | Ruta |
 |-----------|------|
-| Planes + datos preprocesados | `data/nnunet_preprocessed/Dataset101_BraTS/` |
-| Checkpoints | `data/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/` |
+| Planes + datos preprocesados | `output/nnunet_preprocessed/Dataset101_BraTS/` |
+| Checkpoints | `output/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/fold_0/` |
 | Log | `output/stage_3/training_log.csv` |
 | Auditoría | `output/stage_3/reporte_auditoria_stage_3.md` |
 
@@ -250,27 +264,29 @@ Solo train (si ya hay planes): `python scripts/train_nnunet.py --train-only --ye
 ## Estructura en disco
 
 ```
-C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES/
+{project_root}/                  # p.ej. X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES
 ├── Task01_BrainTumour/          # materia prima Decathlon
-├── brats-glioma-seg/            # código + config.yaml
-├── data/
-│   ├── nnunet_raw/
-│   │   └── Dataset101_BraTS/    # Stage 2
-│   ├── nnunet_preprocessed/     # Stage 3
-│   └── nnunet_results/          # Stage 3
-└── output/
+├── brats-glioma-seg/            # código; config.yaml local (gitignored)
+└── output/                      # TODAS las salidas del pipeline
     ├── stage_0/
+    ├── stage_0_test/
     ├── stage_1/
+    ├── stage_1_test/
     ├── stage_2/
-    └── stage_3/
+    ├── stage_3/
+    ├── nnunet_raw/
+    │   └── Dataset101_BraTS/    # Stage 2
+    ├── nnunet_preprocessed/     # Stage 3
+    └── nnunet_results/          # Stage 3
 ```
 
-`stage_2`/`stage_3` paths se resuelven bajo `project_root`.
+Todas las rutas relativas del config se resuelven bajo `project_root`.
 
 ## Historial
 
 | Fecha | Cambio |
 |-------|--------|
+| 2026-08-06 | Docs + setup escritorio GPU: `project_root` en X:, Conda `brats-glioma` en Z:. |
 | 2026-07-28 | Stage 3: plan/preprocess + train nnU-Net v2 (Dataset101, 3d_fullres). |
 | 2026-07-28 | Stage 2: conversión a nnU-Net v2 (Dataset101_BraTS), clases Decathlon. |
 | 2026-07-23 | Proyecto movido a ruta sin acentos. write_nifti con verificación read-after-write. |

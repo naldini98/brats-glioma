@@ -1,35 +1,25 @@
-"""Stage 2: Conversión a formato nnU-Net v2 (Dataset101_BraTS).
+"""Stage 2: Partición reproducible train/val/test sobre los 484 casos con labels.
 
-Entrada: output/stage_1 (solo SUCCESS_PREPROCESSED).
-Salida: data/nnunet_raw/Dataset101_BraTS/ (imagesTr + labelsTr + dataset.json).
+Entrada: casos SUCCESS_PREPROCESSED de output/stage_1/.
+Salida: output/stage_2/split.json + split_log.csv.
 
-No altera geometría ni intensidades: solo renombra/copia y empaqueta metadatos.
-Clases Decathlon {0,1,2,3}. Sin remap a BraTS clásico {0,1,2,4}.
+Default: 70% train, 15% val (CV), 15% test (hold-out con labels).
 """
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import SimpleITK as sitk
 
-from src.data.dicom_geometry import ensure_dir, geometries_match, geometry_tuple, read_nifti
-from src.data.labels import invalid_seg_values, validate_seg
-from src.data.nnunet_convert import (
-    build_dataset_json,
-    copy_nifti,
-    nnunet_case_id,
-    nnunet_paths_for_case,
-    prepare_dataset_dirs,
-    write_dataset_json,
-)
-from src.data.stage_0 import output_paths_for_case, project_root_from_config
-from src.data.stage_1 import STATUS_OK as STAGE1_OK
-from src.data.stage_1 import stage1_paths
+from src.data.dicom_geometry import ensure_dir
+from src.data.stage_0 import project_root_from_config
+from src.data.stage_1 import load_stage1_approved_case_ids, stage1_paths
 
-STATUS_OK = "SUCCESS_CONVERTED"
+STATUS_OK = "SUCCESS_SPLIT"
 STATUS_FAIL = "FAILED"
 
 
@@ -37,219 +27,174 @@ def stage2_paths(config: dict) -> dict[str, Path]:
     root = project_root_from_config(config)
     cfg = config["stage_2"]
     s1 = stage1_paths(config)
-    nn_cfg = config.get("nnunet", {})
 
-    def _p(key: str) -> Path:
-        value = Path(cfg[key])
+    def _p(key: str, default: str) -> Path:
+        value = Path(cfg.get(key, default))
         return value if value.is_absolute() else (root / value)
-
-    nnunet_raw = cfg.get("nnunet_raw") or config.get("paths", {}).get("nnunet_raw", "data/nnunet_raw")
-    nnunet_raw_path = Path(nnunet_raw)
-    if not nnunet_raw_path.is_absolute():
-        nnunet_raw_path = root / nnunet_raw_path
-
-    dataset_id = int(nn_cfg.get("dataset_id", 101))
-    dataset_name = str(nn_cfg.get("dataset_name", "Dataset101_BraTS"))
-    dirs = prepare_dataset_dirs(nnunet_raw_path, dataset_id, dataset_name)
 
     return {
         "root": root,
         "input_log": s1["output_log"],
-        "input_volumes_dir": s1["volumes_dir"],
-        "input_masks_dir": s1["masks_dir"],
-        "output_log": _p("output_log"),
-        "audit_report": _p("audit_report"),
-        "nnunet_raw": nnunet_raw_path,
-        "dataset_folder": dirs["dataset_folder"],
-        "images_tr": dirs["images_tr"],
-        "labels_tr": dirs["labels_tr"],
-        "dataset_json": dirs["dataset_json"],
-        "dataset_id": dataset_id,
-        "dataset_name": dataset_name,
+        "output_log": _p("output_log", "output/stage_2/split_log.csv"),
+        "split_json": _p("split_json", "output/stage_2/split.json"),
+        "audit_report": _p("audit_report", "output/stage_2/reporte_auditoria_stage_2.md"),
     }
 
 
-def load_approved_case_ids(stage1_log: Path) -> list[str]:
-    """Casos aprobados por Stage 1."""
-    if not stage1_log.exists():
-        raise FileNotFoundError(f"No se encontró log Stage 1: {stage1_log}")
-    df = pd.read_csv(stage1_log)
-    if "case_id" not in df.columns or "status" not in df.columns:
-        raise ValueError("preprocessing_log Stage 1 sin columnas case_id/status")
-    approved = df[df["status"] == STAGE1_OK]["case_id"].astype(str).tolist()
-    return sorted(approved)
+def split_ratios_from_config(config: dict) -> dict[str, float]:
+    cfg = config.get("stage_2", {})
+    train = float(cfg.get("train_ratio", 0.70))
+    val = float(cfg.get("val_ratio", 0.15))
+    test = float(cfg.get("test_ratio", 0.15))
+    total = train + val + test
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError(f"Ratios train+val+test deben sumar 1.0, got {total}")
+    return {"train": train, "val": val, "test": test}
 
 
-def verify_stage_2_output(
-    case_id: str,
-    images_tr: Path,
-    labels_tr: Path,
-    modalities: list[str] | None = None,
-) -> tuple[str, str, dict]:
-    """Gate Stage 2: N canales + label, geometría melliza, seg {0,1,2,3}."""
-    modalities = modalities or ["t1", "t1ce", "t2", "flair"]
-    n_ch = len(modalities)
-    paths = nnunet_paths_for_case(case_id, images_tr, labels_tr, n_ch)
+def split_case_ids(
+    case_ids: list[str],
+    *,
+    seed: int,
+    train_ratio: float = 0.70,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+) -> dict[str, list[str]]:
+    """Partición reproducible: ordena, mezcla con seed fija, divide por ratios."""
+    if abs(train_ratio + val_ratio + test_ratio - 1.0) > 1e-6:
+        raise ValueError("train_ratio + val_ratio + test_ratio debe ser 1.0")
 
-    missing = [name for name, path in paths.items() if not path.exists()]
-    if missing:
-        return (
-            STATUS_FAIL,
-            "missing_nifti",
-            {"missing": missing, "paths": {k: str(v) for k, v in paths.items()}},
-        )
+    unique = sorted({str(c).strip() for c in case_ids if str(c).strip()})
+    n = len(unique)
+    if n < 3:
+        raise ValueError(f"Se necesitan al menos 3 casos para split 70/15/15, got {n}")
 
-    try:
-        images = {name: read_nifti(path) for name, path in paths.items()}
-    except Exception as exc:  # noqa: BLE001
-        return STATUS_FAIL, "read_error", {"error": str(exc)}
+    rng = np.random.default_rng(int(seed))
+    shuffled = unique.copy()
+    rng.shuffle(shuffled)
 
-    ordered = [images[f"channel_{i}"] for i in range(n_ch)] + [images["label"]]
-    ok, msg = geometries_match(ordered)
-    if not ok:
-        return STATUS_FAIL, "geometry_mismatch", {"details": msg}
+    n_train = int(n * train_ratio)
+    n_val = int(n * val_ratio)
+    n_test = n - n_train - n_val
+    if n_test < 1:
+        n_test = 1
+        if n_val > 1:
+            n_val -= 1
+        elif n_train > 1:
+            n_train -= 1
 
-    seg = images["label"]
-    if seg.GetPixelID() != sitk.sitkUInt8:
-        return STATUS_FAIL, "seg_dtype", {"pixel_id": int(seg.GetPixelID())}
+    train = shuffled[:n_train]
+    val = shuffled[n_train : n_train + n_val]
+    test = shuffled[n_train + n_val :]
 
-    seg_arr = np.asarray(sitk.GetArrayFromImage(seg))
-    if not validate_seg(seg_arr):
-        invalid = sorted(invalid_seg_values(seg_arr))
-        return STATUS_FAIL, "corrupt_seg", {"invalid_values": invalid}
+    assert len(train) + len(val) + len(test) == n
+    assert len(set(train) & set(val)) == 0
+    assert len(set(train) & set(test)) == 0
+    assert len(set(val) & set(test)) == 0
 
-    for i in range(n_ch):
-        img = images[f"channel_{i}"]
-        if img.GetPixelID() not in (sitk.sitkFloat32, sitk.sitkFloat64):
-            return (
-                STATUS_FAIL,
-                "modality_dtype",
-                {"channel": i, "pixel_id": int(img.GetPixelID())},
-            )
+    return {
+        "train": sorted(train),
+        "val": sorted(val),
+        "test": sorted(test),
+    }
 
-    ref = images["channel_0"]
+
+def build_split_payload(
+    case_ids: list[str],
+    *,
+    seed: int,
+    ratios: dict[str, float],
+) -> dict:
+    parts = split_case_ids(
+        case_ids,
+        seed=seed,
+        train_ratio=ratios["train"],
+        val_ratio=ratios["val"],
+        test_ratio=ratios["test"],
+    )
+    n = len(case_ids)
+    return {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "seed": int(seed),
+        "ratios": ratios,
+        "total": n,
+        "counts": {k: len(v) for k, v in parts.items()},
+        "train": parts["train"],
+        "val": parts["val"],
+        "test": parts["test"],
+    }
+
+
+def write_split_json(path: Path, payload: dict) -> Path:
+    path = Path(path)
+    ensure_dir(path.parent)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    return path
+
+
+def load_split_json(path: Path) -> dict:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No se encontró split.json: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    for key in ("train", "val", "test"):
+        if key not in data or not isinstance(data[key], list):
+            raise ValueError(f"split.json inválido: falta lista '{key}'")
+    return data
+
+
+def verify_split(payload: dict) -> tuple[str, str, dict]:
+    """Gate Stage 2: partición sin solapamiento y conteos coherentes."""
+    train = list(payload.get("train", []))
+    val = list(payload.get("val", []))
+    test = list(payload.get("test", []))
+    total = int(payload.get("total", len(train) + len(val) + len(test)))
+
+    if not train or not val or not test:
+        return STATUS_FAIL, "empty_partition", {"train": len(train), "val": len(val), "test": len(test)}
+
+    all_ids = train + val + test
+    if len(set(all_ids)) != len(all_ids):
+        return STATUS_FAIL, "duplicate_case_ids", {"n_unique": len(set(all_ids)), "n_total": len(all_ids)}
+
+    if len(all_ids) != total:
+        return STATUS_FAIL, "count_mismatch", {"expected": total, "got": len(all_ids)}
+
+    ratios = payload.get("ratios", {})
     return (
         STATUS_OK,
         "",
         {
-            "case_id": nnunet_case_id(case_id),
-            "n_channels": n_ch,
-            "geometry": geometry_tuple(ref),
-            "paths": {k: str(v) for k, v in paths.items()},
+            "total": total,
+            "counts": {"train": len(train), "val": len(val), "test": len(test)},
+            "ratios": ratios,
+            "seed": payload.get("seed"),
         },
     )
 
 
-def process_one_case(
-    case_id: str,
-    *,
-    input_volumes_dir: Path,
-    input_masks_dir: Path,
-    images_tr: Path,
-    labels_tr: Path,
-    modalities: list[str],
-    label_file: str,
-) -> dict:
-    cid = nnunet_case_id(case_id)
-    record: dict = {
-        "case_id": cid,
-        "status": STATUS_FAIL,
-        "reason": "",
-        "details": "",
-        "n_channels": len(modalities),
-        "path_label": "",
-    }
-    for i, mod in enumerate(modalities):
-        record[f"path_{mod}"] = ""
-        record[f"channel_{i}"] = mod
-
-    try:
-        in_paths = output_paths_for_case(
-            case_id, input_volumes_dir, input_masks_dir, modalities, label_file
-        )
-        missing = [k for k, p in in_paths.items() if not p.exists()]
-        if missing:
-            record["reason"] = "missing_stage1_input"
-            record["details"] = f"Faltan: {missing}"
-            return record
-
-        out_paths = nnunet_paths_for_case(cid, images_tr, labels_tr, len(modalities))
-
-        for i, mod in enumerate(modalities):
-            dst = copy_nifti(in_paths[mod], out_paths[f"channel_{i}"])
-            record[f"path_{mod}"] = str(dst)
-
-        dst_label = copy_nifti(in_paths[label_file], out_paths["label"])
-        record["path_label"] = str(dst_label)
-
-        status, reason, details = verify_stage_2_output(
-            cid, images_tr, labels_tr, modalities
-        )
-        record["status"] = status
-        record["reason"] = reason
-        if status == STATUS_OK:
-            record["details"] = "nnU-Net packaging OK"
-            geom = details.get("geometry") or {}
-            size = geom.get("size")
-            if size:
-                record["details"] = f"nnU-Net OK size={size}"
-        else:
-            record["details"] = str(details)
-        return record
-
-    except Exception as exc:  # noqa: BLE001
-        record["reason"] = "exception"
-        record["details"] = str(exc)
-        return record
-
-
-def write_stage2_dataset_json(
-    config: dict,
-    paths: dict[str, Path],
-    num_training: int,
-    modalities: list[str],
-) -> Path:
-    labels_cfg = config.get("labels", {}).get("classes", {
-        "background": 0,
-        "edema": 1,
-        "non_enhancing": 2,
-        "enhancing": 3,
-    })
-    project = config.get("project", {})
-    meta = build_dataset_json(
-        modalities=modalities,
-        labels=labels_cfg,
-        num_training=num_training,
-        dataset_name=str(paths["dataset_name"]),
-        release=str(project.get("edition", "1.0")),
-    )
-    return write_dataset_json(paths["dataset_json"], meta)
-
-
 def run_stage_2(config: dict, *, yes: bool = False) -> pd.DataFrame:
-    """Orquesta Stage 2 completo."""
+    """Orquesta Stage 2: split reproducible 70/15/15 sobre Stage 1."""
     paths = stage2_paths(config)
     cfg = config["stage_2"]
-    modalities: list[str] = list(cfg.get("modalities") or config["stage_1"]["modalities"])
-    label_file: str = cfg.get("label_file", "seg")
+    project = config.get("project", {})
+    seed = int(cfg.get("seed", project.get("seed", 42)))
+    ratios = split_ratios_from_config(config)
     max_cases = cfg.get("max_cases")
 
-    ensure_dir(paths["images_tr"])
-    ensure_dir(paths["labels_tr"])
-    ensure_dir(paths["output_log"].parent)
-
-    case_ids = load_approved_case_ids(paths["input_log"])
+    case_ids = load_stage1_approved_case_ids(paths["input_log"])
     if max_cases is not None:
         case_ids = case_ids[: int(max_cases)]
 
-    print("[*] Stage 2: Conversión a formato nnU-Net v2")
-    print(f"    input volumes: {paths['input_volumes_dir']}")
-    print(f"    input masks:   {paths['input_masks_dir']}")
-    print(f"    dataset:       {paths['dataset_folder']}")
-    print(f"    casos:         {len(case_ids)} (aprobados Stage 1)")
-    print(f"    canales:       {list(enumerate(modalities))} → _0000.._{len(modalities)-1:04d}")
-    print(f"    clases:        Decathlon {{0,1,2,3}} (sin remap)")
-    print(f"    dataset.json:  {paths['dataset_json']}")
+    print("[*] Stage 2: Partición reproducible train/val/test")
+    print(f"    input log:  {paths['input_log']}")
+    print(f"    casos:      {len(case_ids)} (aprobados Stage 1)")
+    print(f"    ratios:     train={ratios['train']:.0%} val={ratios['val']:.0%} test={ratios['test']:.0%}")
+    print(f"    seed:       {seed}")
+    print(f"    split.json: {paths['split_json']}")
 
     if not yes:
         answer = input("Continuar? [y/N]: ").strip().lower()
@@ -257,31 +202,31 @@ def run_stage_2(config: dict, *, yes: bool = False) -> pd.DataFrame:
             print("[-] Cancelado por el usuario.")
             return pd.DataFrame()
 
-    records: list[dict] = []
-    for i, case_id in enumerate(case_ids, start=1):
-        print(f"[{i}/{len(case_ids)}] {case_id} ...", flush=True)
-        rec = process_one_case(
-            case_id,
-            input_volumes_dir=paths["input_volumes_dir"],
-            input_masks_dir=paths["input_masks_dir"],
-            images_tr=paths["images_tr"],
-            labels_tr=paths["labels_tr"],
-            modalities=modalities,
-            label_file=label_file,
-        )
-        records.append(rec)
-        flag = "+" if rec["status"] == STATUS_OK else "-"
-        print(f"  [{flag}] {rec['case_id']}: {rec['status']} {rec['reason']}".rstrip())
+    payload = build_split_payload(case_ids, seed=seed, ratios=ratios)
+    write_split_json(paths["split_json"], payload)
+    status, reason, details = verify_split(payload)
 
-    log_df = pd.DataFrame(records)
+    record = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "status": status,
+        "reason": reason,
+        "seed": seed,
+        "total": payload["total"],
+        "n_train": payload["counts"]["train"],
+        "n_val": payload["counts"]["val"],
+        "n_test": payload["counts"]["test"],
+        "train_ratio": ratios["train"],
+        "val_ratio": ratios["val"],
+        "test_ratio": ratios["test"],
+        "split_json": str(paths["split_json"]),
+        "details": str(details),
+    }
+    log_df = pd.DataFrame([record])
+    ensure_dir(paths["output_log"].parent)
     log_df.to_csv(paths["output_log"], index=False)
 
-    n_ok = int((log_df["status"] == STATUS_OK).sum()) if not log_df.empty else 0
-    n_fail = len(log_df) - n_ok
-
-    write_stage2_dataset_json(config, paths, num_training=n_ok, modalities=modalities)
-
+    print(f"[*] Split: train={record['n_train']} val={record['n_val']} test={record['n_test']}")
     print(f"[*] Log: {paths['output_log']}")
-    print(f"[*] dataset.json: {paths['dataset_json']} (numTraining={n_ok})")
-    print(f"[*] Resumen: {n_ok} {STATUS_OK}, {n_fail} {STATUS_FAIL}")
+    print(f"[*] split.json: {paths['split_json']}")
+    print(f"[*] Resumen: {status}" + (f" ({reason})" if reason else ""))
     return log_df

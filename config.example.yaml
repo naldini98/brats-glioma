@@ -3,9 +3,10 @@ project:
   edition: Medical-Decathlon-Task01-BrainTumour
   seed: 42
 
-# Raíz del proyecto (carpeta que contiene Task01_BrainTumour/, output/, data/)
+# Raíz del proyecto (carpeta que contiene Task01_BrainTumour/, output/, brats-glioma-seg/)
 # Copiar este archivo a config.yaml y ajustar la ruta.
-project_root: "C:/ruta/a/GLIOMAS CEREBRALES"
+# Escritorio GPU (ejemplo): X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES
+project_root: "X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES"
 
 stage_0:
   decathlon_root: "Task01_BrainTumour"
@@ -24,12 +25,15 @@ stage_0:
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
   max_cases: null
+  # Solo 484 train con labels; imagesTs sin labels no se procesa
+  process_test: false
 
 stage_1:
   output_log: "output/stage_1/preprocessing_log.csv"
   volumes_dir: "output/stage_1/01_nifti_volumes"
   masks_dir: "output/stage_1/02_nifti_masks"
   audit_report: "output/stage_1/reporte_auditoria_stage_1.md"
+  process_test: false
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
   orientation: RAS
@@ -47,19 +51,29 @@ stage_1:
   max_cases: null
 
 stage_2:
-  output_log: "output/stage_2/conversion_log.csv"
+  output_log: "output/stage_2/split_log.csv"
+  split_json: "output/stage_2/split.json"
   audit_report: "output/stage_2/reporte_auditoria_stage_2.md"
-  nnunet_raw: "data/nnunet_raw"
+  seed: 42
+  train_ratio: 0.70
+  val_ratio: 0.15
+  test_ratio: 0.15
+  max_cases: null
+
+stage_3:
+  output_log: "output/stage_3/conversion_log.csv"
+  audit_report: "output/stage_3/reporte_auditoria_stage_3.md"
+  nnunet_raw: "output/nnunet_raw"
   modalities: [t1, t1ce, t2, flair]
   label_file: seg
   max_cases: null
 
-stage_3:
-  output_log: "output/stage_3/training_log.csv"
-  audit_report: "output/stage_3/reporte_auditoria_stage_3.md"
-  nnunet_raw: "data/nnunet_raw"
-  nnunet_preprocessed: "data/nnunet_preprocessed"
-  nnunet_results: "data/nnunet_results"
+stage_4:
+  output_log: "output/stage_4/training_log.csv"
+  audit_report: "output/stage_4/reporte_auditoria_stage_4.md"
+  nnunet_raw: "output/nnunet_raw"
+  nnunet_preprocessed: "output/nnunet_preprocessed"
+  nnunet_results: "output/nnunet_results"
   run_plan_and_preprocess: true
   run_train: true
   verify_dataset_integrity: true
@@ -72,7 +86,7 @@ stage_3:
   trainer: nnUNetTrainer
   plans: nnUNetPlans
   folds: [0]
-  device: auto
+  device: cuda
   continue_training: false
   npz: false
   only_validation: false
@@ -98,6 +112,6 @@ nnunet:
   fold: 0
 
 paths:
-  nnunet_raw: data/nnunet_raw
-  nnunet_preprocessed: data/nnunet_preprocessed
-  nnunet_results: data/nnunet_results
+  nnunet_raw: output/nnunet_raw
+  nnunet_preprocessed: output/nnunet_preprocessed
+  nnunet_results: output/nnunet_results

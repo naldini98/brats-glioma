@@ -1,13 +1,13 @@
-"""Stage 3: Plan/preprocess + entrenamiento nnU-Net v2.
+"""Stage 4: Plan/preprocess + entrenamiento nnU-Net v2.
 
-Entrada: data/nnunet_raw/Dataset101_BraTS (Stage 2).
+Entrada: output/nnunet_raw/Dataset101_BraTS (Stage 3, solo train split).
 Pasos:
-  1) nnUNetv2_plan_and_preprocess  — fingerprint, planes, preprocesado interno
-  2) nnUNetv2_train                — entrena fold(s) (default fold 0, 3d_fullres)
+  1) nnUNetv2_plan_and_preprocess
+  2) nnUNetv2_train
 
 Salidas:
-  data/nnunet_preprocessed/Dataset101_BraTS/
-  data/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/
+  output/nnunet_preprocessed/Dataset101_BraTS/
+  output/nnunet_results/Dataset101_BraTS/nnUNetTrainer__nnUNetPlans__3d_fullres/
 """
 
 from __future__ import annotations
@@ -38,27 +38,27 @@ STATUS_PLANNED = "SUCCESS_PLANNED"
 STATUS_FAIL = "FAILED"
 
 
-def stage3_paths(config: dict) -> dict:
+def stage4_paths(config: dict) -> dict:
     root = project_root_from_config(config)
-    cfg = config.get("stage_3", {})
+    cfg = config.get("stage_4", {})
     nn_cfg = config.get("nnunet", {})
-    s2 = config.get("stage_2", {})
+    s3 = config.get("stage_3", {})
 
     def _cfg_path(key: str, default: str) -> Path:
-        value = cfg.get(key) or config.get("paths", {}).get(key) or default
+        value = cfg.get(key) or config.get("paths", {}).get(key) or s3.get(key) or default
         return resolve_under_root(root, value)
 
-    nnunet_raw = _cfg_path("nnunet_raw", s2.get("nnunet_raw", "data/nnunet_raw"))
-    nnunet_preprocessed = _cfg_path("nnunet_preprocessed", "data/nnunet_preprocessed")
-    nnunet_results = _cfg_path("nnunet_results", "data/nnunet_results")
+    nnunet_raw = _cfg_path("nnunet_raw", s3.get("nnunet_raw", "output/nnunet_raw"))
+    nnunet_preprocessed = _cfg_path("nnunet_preprocessed", "output/nnunet_preprocessed")
+    nnunet_results = _cfg_path("nnunet_results", "output/nnunet_results")
 
     dataset_id = int(nn_cfg.get("dataset_id", 101))
     dataset_name = str(nn_cfg.get("dataset_name", "Dataset101_BraTS"))
     folder_name = dataset_folder_name(dataset_id, dataset_name)
 
-    output_log = resolve_under_root(root, cfg.get("output_log", "output/stage_3/training_log.csv"))
+    output_log = resolve_under_root(root, cfg.get("output_log", "output/stage_4/training_log.csv"))
     audit_report = resolve_under_root(
-        root, cfg.get("audit_report", "output/stage_3/reporte_auditoria_stage_3.md")
+        root, cfg.get("audit_report", "output/stage_4/reporte_auditoria_stage_4.md")
     )
 
     return {
@@ -80,8 +80,8 @@ def stage3_paths(config: dict) -> dict:
     }
 
 
-def verify_stage2_dataset(paths: dict) -> tuple[bool, str]:
-    """Comprueba que Stage 2 dejó un dataset usable."""
+def verify_stage3_dataset(paths: dict) -> tuple[bool, str]:
+    """Comprueba que Stage 3 dejó un dataset usable."""
     if not paths["dataset_json"].exists():
         return False, f"Falta dataset.json: {paths['dataset_json']}"
     if not paths["images_tr"].exists():
@@ -183,13 +183,12 @@ def build_train_command(
     return cmd
 
 
-def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
-    """Orquesta Stage 3: plan/preprocess + train."""
-    paths = stage3_paths(config)
-    cfg = config.get("stage_3", {})
+def run_stage_4(config: dict, *, yes: bool = False) -> pd.DataFrame:
+    """Orquesta Stage 4: plan/preprocess + train."""
+    paths = stage4_paths(config)
+    cfg = config.get("stage_4", {})
     nn_cfg = config.get("nnunet", {})
 
-    # fold legacy en nnunet.fold si stage_3.folds no está
     folds = parse_folds(cfg.get("folds", nn_cfg.get("fold", 0)))
     device = detect_device(str(cfg.get("device", "auto")))
     run_plan = bool(cfg.get("run_plan_and_preprocess", True))
@@ -200,9 +199,9 @@ def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
     ensure_dir(paths["nnunet_results"])
     ensure_dir(paths["output_log"].parent)
 
-    ok_ds, ds_msg = verify_stage2_dataset(paths)
+    ok_ds, ds_msg = verify_stage3_dataset(paths)
     if not ok_ds:
-        raise FileNotFoundError(f"Stage 2 incompleto: {ds_msg}")
+        raise FileNotFoundError(f"Stage 3 incompleto: {ds_msg}")
 
     env = apply_nnunet_env(
         nnunet_raw=paths["nnunet_raw"],
@@ -210,7 +209,7 @@ def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
         nnunet_results=paths["nnunet_results"],
     )
 
-    print("[*] Stage 3: nnU-Net v2 plan/preprocess + train")
+    print("[*] Stage 4: nnU-Net v2 plan/preprocess + train")
     print(f"    dataset:       {paths['dataset_folder']}")
     print(f"    raw:           {paths['nnunet_raw']}")
     print(f"    preprocessed:  {paths['nnunet_preprocessed']}")
@@ -223,7 +222,7 @@ def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
     print(f"    device:        {device}")
     print(f"    plan+pp:       {run_plan}")
     print(f"    train:         {run_train}")
-    print(f"    Stage2 check:  {ds_msg}")
+    print(f"    Stage3 check:  {ds_msg}")
 
     if device == "cpu":
         print(
@@ -268,7 +267,7 @@ def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
         if status == STATUS_FAIL:
             _write_log(records, paths["output_log"])
             print(f"[*] Log: {paths['output_log']}")
-            print("[!] Stage 3 detenido: falló plan_and_preprocess")
+            print("[!] Stage 4 detenido: falló plan_and_preprocess")
             return pd.DataFrame(records)
 
     if run_train:
@@ -281,7 +280,6 @@ def run_stage_3(config: dict, *, yes: bool = False) -> pd.DataFrame:
             elapsed = round(time.time() - t0, 1)
             status, reason, details = verify_fold_checkpoint(paths, fold)
             if proc.returncode != 0 and status == STATUS_OK:
-                # checkpoint existe pero proceso falló al final (poco frecuente)
                 reason = f"exit_code_{proc.returncode}_with_checkpoint"
             elif proc.returncode != 0:
                 status, reason = STATUS_FAIL, f"exit_code_{proc.returncode}"

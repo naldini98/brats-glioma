@@ -1,13 +1,14 @@
 # Registro de Experimentos
 
-Última actualización: 28 de julio de 2026  
+Última actualización: 6 de agosto de 2026  
 Proyecto: brats-glioma-seg (Medical Decathlon Task01)  
-Raíz: `C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`
+Raíz activa: `project_root` en `config.yaml` (escritorio: `X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`)
 
 ## Bitácora
 
 | Fecha | Hito | Detalle |
 |-------|------|---------|
+| 2026-08-06 | Setup PC GPU | Task01 en X:; entorno Conda `brats-glioma` en `Z:\Entornos virtuales\`; regenerar output/data en escritorio o copiar desde otra máquina. |
 | 2026-07-28 | Stage 3 implementado | plan_and_preprocess + train 3d_fullres fold 0. |
 | 2026-07-28 | Stage 2 completo | 484/484 SUCCESS_CONVERTED. Dataset101_BraTS listo. |
 | 2026-07-28 | Stage 2 implementado | Convert a nnU-Net v2 Dataset101_BraTS. Clases {0,1,2,3}. |
@@ -20,12 +21,14 @@ Raíz: `C:/Users/franc/FRANCO/PROYECTOS/GLIOMAS CEREBRALES`
 
 ## Experimento 000 - Baseline
 
+Métricas stages 0–2 de la corrida histórica (otra ruta/máquina). En el escritorio GPU, completar de nuevo o copiar `{project_root}/output` y `{project_root}/data` antes de Stage 3.
+
 | Campo | Valor |
 |-------|-------|
 | Dataset | Task01_BrainTumour (484 train) |
-| Stage 0 | 484 SUCCESS_GEOMETRIC_APPROVED |
-| Stage 1 | 484 SUCCESS_PREPROCESSED |
-| Stage 2 | 484 SUCCESS_CONVERTED |
+| Stage 0 | 484 SUCCESS_GEOMETRIC_APPROVED (histórico) |
+| Stage 1 | 484 SUCCESS_PREPROCESSED (histórico) |
+| Stage 2 | 484 SUCCESS_CONVERTED (histórico) |
 | Normalización | clip [0.5, 99.5] + z-score por modalidad/caso |
 | Spacing | 1.0 mm isotrópico |
 | Orientación | RAS |
@@ -55,7 +58,7 @@ Comando: `python main.py --stage stage_1 --yes`
 
 Comando: `python main.py --stage stage_2 --yes`  
 Auditoría: `python tools/audit_stage_2.py`  
-Dataset: `data/nnunet_raw/Dataset101_BraTS/`
+Dataset: `output/nnunet_raw/Dataset101_BraTS/`
 
 ### Stage 3 (completar tras corrida)
 

@@ -79,6 +79,23 @@ def list_training_cases(
     return cases
 
 
+def list_test_image_paths(decathlon_root: Path, dataset_json: Path | None = None) -> list[dict]:
+    """Lista volúmenes 4D de test (Decathlon imagesTs) desde dataset.json."""
+    root = Path(decathlon_root)
+    js_path = dataset_json or (root / "dataset.json")
+    if not js_path.exists():
+        return []
+    meta = load_dataset_json(js_path)
+    entries: list[dict] = []
+    for rel in meta.get("test", []):
+        image_rel = str(rel).replace("./", "")
+        image_path = root / image_rel
+        case_id = image_path.stem.replace(".nii", "")
+        entries.append({"case_id": case_id, "image_path": image_path})
+    entries.sort(key=lambda c: c["case_id"])
+    return entries
+
+
 def detect_channel_axis(size: tuple[int, ...], n_modalities: int = 4) -> int:
     """Detecta el eje de canales en GetSize() de SimpleITK (típicamente el último)."""
     if len(size) != 4:

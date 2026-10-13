@@ -9,8 +9,8 @@ Cuatro modalidades MRI (T1, T1ce, T2, FLAIR), etiquetas Decathlon `{0,1,2,3}` y 
 ```
 Task01_BrainTumour/     →  Stage 0  →  output/stage_0/
                          →  Stage 1  →  output/stage_1/
-                         →  Stage 2  →  data/nnunet_raw/Dataset101_BraTS/
-                         →  Stage 3  →  data/nnunet_preprocessed/ + data/nnunet_results/
+                         →  Stage 2  →  output/nnunet_raw/Dataset101_BraTS/
+                         →  Stage 3  →  output/nnunet_preprocessed/ + output/nnunet_results/
                          →  Stage 4  →  eval (pendiente)
 ```
 
@@ -28,16 +28,38 @@ Task01_BrainTumour/     →  Stage 0  →  output/stage_0/
 - [Medical Segmentation Decathlon Task01_BrainTumour](http://medicaldecathlon.com/) (descarga aparte, **no incluido** en este repo)
 - GPU recomendada para Stage 3 (entrenamiento)
 
+### Entorno Conda
+
+**PC escritorio (GPU, entorno en disco Z):** ver [docs/setup-desktop.md](docs/setup-desktop.md).
+
+```powershell
+conda create --prefix "Z:\Entornos virtuales\brats-glioma" python=3.10 -y
+conda activate "Z:\Entornos virtuales\brats-glioma"
+cd "X:\FRANCO\PROYECTOS\GLIOMAS CEREBRALES\brats-glioma-seg"
+pip install -r requirements.txt
+python -c "import torch; print('cuda:', torch.cuda.is_available())"
+```
+
+**Otra máquina** (env por nombre en la ubicación por defecto de Conda):
+
 ```bash
 conda create -n brats-glioma python=3.10 -y
 conda activate brats-glioma
 pip install -r requirements.txt
 ```
 
+Tras `pip install`, si Stage 3 debe usar GPU NVIDIA, comprobá CUDA con el comando `torch` de arriba e instalá el wheel CUDA adecuado desde [pytorch.org](https://pytorch.org) si hace falta.
+
 ## Configuración
 
-1. Copiá `config.example.yaml` → `config.yaml` (o editá el existente).
-2. Ajustá `project_root` a la carpeta que contiene `Task01_BrainTumour/`, `output/` y `data/`.
+1. Copiá `config.example.yaml` → `config.yaml` (o editá el existente). `config.yaml` no se commitea (`.gitignore`).
+2. Ajustá `project_root` a la carpeta que contiene `Task01_BrainTumour/`, `output/` y `brats-glioma-seg/`.
+
+En el escritorio con GPU:
+
+```yaml
+project_root: "X:/FRANCO/PROYECTOS/GLIOMAS CEREBRALES"
+```
 
 Ejemplo de layout local:
 
@@ -93,6 +115,7 @@ Canales nnU-Net (Stage 2): `_0000`=t1, `_0001`=t1ce, `_0002`=t2, `_0003`=flair
 
 ## Documentación
 
+- [docs/setup-desktop.md](docs/setup-desktop.md) — entorno Z:, rutas X:, tests y stages
 - [docs/pipeline.md](docs/pipeline.md) — detalle por stage
 - [docs/experiments.md](docs/experiments.md) — bitácora de corridas
 - [AGENTS.md](AGENTS.md) — reglas del proyecto

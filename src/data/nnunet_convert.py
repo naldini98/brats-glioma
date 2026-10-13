@@ -58,6 +58,7 @@ def build_dataset_json(
     labels: dict,
     num_training: int,
     dataset_name: str,
+    num_test: int | None = None,
     description: str = "BraTS glioma segmentation (Medical Decathlon Task01)",
     reference: str = "Medical Segmentation Decathlon Task01_BrainTumour",
     licence: str = "CC-BY-SA 4.0",
@@ -65,7 +66,7 @@ def build_dataset_json(
     file_ending: str = ".nii.gz",
 ) -> dict:
     """Metadatos nnU-Net v2 (labels consecutivos 0..N)."""
-    return {
+    meta = {
         "channel_names": build_channel_names(modalities),
         "labels": {str(k): int(v) for k, v in labels.items()},
         "numTraining": int(num_training),
@@ -77,6 +78,9 @@ def build_dataset_json(
         "release": release,
         "tensorImageSize": "3D",
     }
+    if num_test is not None:
+        meta["numTest"] = int(num_test)
+    return meta
 
 
 def write_dataset_json(path: Path, meta: dict) -> Path:
@@ -108,7 +112,7 @@ def nnunet_paths_for_case(
     n_channels: int,
     file_ending: str = ".nii.gz",
 ) -> dict[str, Path]:
-    """Rutas destino nnU-Net para un caso."""
+    """Rutas destino nnU-Net para un caso (training)."""
     paths: dict[str, Path] = {
         f"channel_{i}": images_tr / channel_filename(case_id, i, file_ending)
         for i in range(n_channels)
@@ -117,14 +121,30 @@ def nnunet_paths_for_case(
     return paths
 
 
+def nnunet_test_paths_for_case(
+    case_id: str,
+    images_ts: Path,
+    n_channels: int,
+    file_ending: str = ".nii.gz",
+) -> dict[str, Path]:
+    """Rutas destino nnU-Net para un caso de test (solo canales, sin label)."""
+    cid = nnunet_case_id(case_id)
+    return {
+        f"channel_{i}": images_ts / channel_filename(cid, i, file_ending)
+        for i in range(n_channels)
+    }
+
+
 def prepare_dataset_dirs(nnunet_raw: Path, dataset_id: int, dataset_name: str) -> dict[str, Path]:
-    """Crea DatasetXXX/imagesTr y labelsTr."""
+    """Crea DatasetXXX/imagesTr, labelsTr e imagesTs."""
     folder = ensure_dir(nnunet_raw / dataset_folder_name(dataset_id, dataset_name))
     images_tr = ensure_dir(folder / "imagesTr")
     labels_tr = ensure_dir(folder / "labelsTr")
+    images_ts = ensure_dir(folder / "imagesTs")
     return {
         "dataset_folder": folder,
         "images_tr": images_tr,
         "labels_tr": labels_tr,
+        "images_ts": images_ts,
         "dataset_json": folder / "dataset.json",
     }

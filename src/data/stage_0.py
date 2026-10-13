@@ -14,7 +14,7 @@ import SimpleITK as sitk
 
 from src.data.dicom_geometry import ensure_dir, geometries_match, geometry_tuple, read_nifti
 from src.data.mask_generator import process_and_save_mask
-from src.data.preprocessor import list_training_cases, load_and_split_case, save_modality_volumes
+from src.data.preprocessor import list_test_image_paths, list_training_cases, load_and_split_case, save_modality_volumes
 
 STATUS_OK = "SUCCESS_GEOMETRIC_APPROVED"
 STATUS_FAIL = "FAILED"
@@ -36,7 +36,7 @@ def stage0_paths(config: dict) -> dict[str, Path]:
         return value if value.is_absolute() else (root / value)
 
     decathlon = _p("decathlon_root")
-    return {
+    out = {
         "root": root,
         "decathlon_root": decathlon,
         "images_dir": decathlon / cfg.get("images_subdir", "imagesTr"),
@@ -46,6 +46,30 @@ def stage0_paths(config: dict) -> dict[str, Path]:
         "volumes_dir": _p("volumes_dir"),
         "masks_dir": _p("masks_dir"),
         "audit_report": _p("audit_report"),
+    }
+    if cfg.get("process_test", True):
+
+        def _t(key: str, default: str) -> Path:
+            value = Path(cfg.get(key, default))
+            return value if value.is_absolute() else (root / value)
+
+        out["test_output_log"] = _t("test_output_log", "output/stage_0_test/processing_log.csv")
+        out["test_volumes_dir"] = _t("test_volumes_dir", "output/stage_0_test/01_nifti_volumes")
+        out["test_audit_report"] = _t(
+            "test_audit_report", "output/stage_0_test/reporte_auditoria_stage_0.md"
+        )
+    return out
+
+
+def modality_volume_paths(
+    case_id: str,
+    volumes_dir: Path,
+    modalities: list[str],
+) -> dict[str, Path]:
+    """Rutas de modalidades 3D (sin seg) bajo volume_{case_id}/."""
+    folder = f"volume_{case_id}"
+    return {
+        mod: volumes_dir / folder / f"{folder}-{mod}.nii.gz" for mod in modalities
     }
 
 
@@ -189,6 +213,138 @@ def process_one_case(
         return record
 
 
+def verify_stage_0_test_output(
+    case_id: str,
+    volumes_dir: Path,
+    modalities: list[str] | None = None,
+) -> tuple[str, str, dict]:
+    """Gate Stage 0 test: 4 modalidades, misma geometría (sin seg)."""
+    modalities = modalities or ["t1", "t1ce", "t2", "flair"]
+    paths = modality_volume_paths(case_id, volumes_dir, modalities)
+    missing = [name for name, path in paths.items() if not path.exists()]
+    if missing:
+        return STATUS_FAIL, "missing_nifti", {"missing": missing}
+
+    try:
+        images = {name: read_nifti(path) for name, path in paths.items()}
+    except Exception as exc:  # noqa: BLE001
+        return STATUS_FAIL, "read_error", {"error": str(exc)}
+
+    ordered = [images[m] for m in modalities]
+    ok, msg = geometries_match(ordered)
+    if not ok:
+        return STATUS_FAIL, "geometry_mismatch", {"details": msg}
+
+    ref_geom = geometry_tuple(images[modalities[0]])
+    shapes = {name: geometry_tuple(img)["size"] for name, img in images.items()}
+    return STATUS_OK, "", {"shapes": shapes, "geometry": ref_geom}
+
+
+def process_one_test_case_stage0(
+    case: dict,
+    *,
+    volumes_dir: Path,
+    modalities: list[str],
+    channel_to_modality: dict[int, str],
+) -> dict:
+    case_id = case["case_id"]
+    record: dict = {
+        "case_id": case_id,
+        "status": STATUS_FAIL,
+        "reason": "",
+        "details": "",
+        "shapes": "",
+    }
+    for mod in modalities:
+        record[f"path_{mod}"] = ""
+
+    try:
+        image_path = case["image_path"]
+        if not image_path.exists():
+            record["reason"] = "missing_image"
+            record["details"] = str(image_path)
+            return record
+
+        modality_imgs, _ = load_and_split_case(image_path, channel_to_modality=channel_to_modality)
+        for mod in modalities:
+            if mod not in modality_imgs:
+                record["reason"] = "missing_modality"
+                record["details"] = mod
+                return record
+
+        vol_paths = save_modality_volumes(
+            modality_imgs, case_id, volumes_dir, modality_order=modalities
+        )
+        status, reason, details = verify_stage_0_test_output(case_id, volumes_dir, modalities)
+        record["status"] = status
+        record["reason"] = reason
+        if status == STATUS_OK:
+            record["details"] = "Geometría melliza OK (espacio nativo Decathlon, test)"
+            shapes = details.get("shapes") or {}
+            ref = shapes.get(modalities[0])
+            if ref:
+                record["shapes"] = f"{ref[2]}x{ref[1]}x{ref[0]}"
+        else:
+            record["details"] = str(details)
+        for mod in modalities:
+            record[f"path_{mod}"] = str(vol_paths[mod])
+        return record
+    except Exception as exc:  # noqa: BLE001
+        record["reason"] = "exception"
+        record["details"] = str(exc)
+        return record
+
+
+def run_stage_0_test(config: dict, *, yes: bool = False) -> pd.DataFrame:
+    """Stage 0 sobre Task01 imagesTs (split 4D, sin labels)."""
+    paths = stage0_paths(config)
+    cfg = config["stage_0"]
+    if not cfg.get("process_test", True):
+        return pd.DataFrame()
+
+    modalities = list(cfg["modalities"])
+    channel_to_modality = {int(k): str(v) for k, v in cfg["channel_to_modality"].items()}
+    max_cases = cfg.get("test_max_cases")
+
+    ensure_dir(paths["test_volumes_dir"])
+    ensure_dir(paths["test_output_log"].parent)
+
+    cases = list_test_image_paths(paths["decathlon_root"], paths["dataset_json"])
+    if max_cases is not None:
+        cases = cases[: int(max_cases)]
+
+    print("[*] Stage 0 (test): imagesTs → volúmenes por modalidad (nativo)")
+    print(f"    input:   {paths['decathlon_root'] / 'imagesTs'}")
+    print(f"    volumes: {paths['test_volumes_dir']}")
+    print(f"    casos:   {len(cases)}")
+
+    if not yes:
+        answer = input("Continuar Stage 0 test? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes", "s", "si"}:
+            print("[-] Stage 0 test cancelado.")
+            return pd.DataFrame()
+
+    records: list[dict] = []
+    for i, case in enumerate(cases, start=1):
+        print(f"[test {i}/{len(cases)}] {case['case_id']} ...", flush=True)
+        rec = process_one_test_case_stage0(
+            case,
+            volumes_dir=paths["test_volumes_dir"],
+            modalities=modalities,
+            channel_to_modality=channel_to_modality,
+        )
+        records.append(rec)
+        flag = "+" if rec["status"] == STATUS_OK else "-"
+        print(f"  [{flag}] {rec['case_id']}: {rec['status']} {rec['reason']}".rstrip())
+
+    log_df = pd.DataFrame(records)
+    log_df.to_csv(paths["test_output_log"], index=False)
+    n_ok = int((log_df["status"] == STATUS_OK).sum()) if not log_df.empty else 0
+    print(f"[*] Test log: {paths['test_output_log']}")
+    print(f"[*] Stage 0 test: {n_ok} {STATUS_OK}, {len(log_df) - n_ok} {STATUS_FAIL}")
+    return log_df
+
+
 def run_stage_0(config: dict, *, yes: bool = False) -> pd.DataFrame:
     """Orquesta Stage 0 completo y escribe processing_log.csv."""
     paths = stage0_paths(config)
@@ -245,5 +401,9 @@ def run_stage_0(config: dict, *, yes: bool = False) -> pd.DataFrame:
     n_ok = int((log_df["status"] == STATUS_OK).sum()) if not log_df.empty else 0
     n_fail = len(log_df) - n_ok
     print(f"[*] Log: {paths['output_log']}")
-    print(f"[*] Resumen: {n_ok} {STATUS_OK}, {n_fail} {STATUS_FAIL}")
+    print(f"[*] Resumen train: {n_ok} {STATUS_OK}, {n_fail} {STATUS_FAIL}")
+
+    if cfg.get("process_test", True):
+        run_stage_0_test(config, yes=yes)
+
     return log_df

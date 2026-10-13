@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Auditoría post-hoc del Stage 3 (planes + checkpoints nnU-Net)."""
+"""Auditoría post-hoc del Stage 3 (formato nnU-Net v2)."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -13,88 +14,89 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.pipeline_io import load_config
-from src.models.nnunet_env import expected_results_dir, parse_folds
-from src.models.stage_3 import (
-    STATUS_FAIL,
-    STATUS_OK,
-    STATUS_PLANNED,
-    stage3_paths,
-    verify_fold_checkpoint,
-    verify_plans,
-    verify_stage2_dataset,
-)
+from src.data.stage_2 import load_split_json
+from src.data.stage_3 import STATUS_FAIL, STATUS_OK, stage3_paths, verify_stage_3_output
 
 
 def audit_stage_3(config: dict) -> Path:
     paths = stage3_paths(config)
-    cfg = config.get("stage_3", {})
-    nn_cfg = config.get("nnunet", {})
-    folds = parse_folds(cfg.get("folds", nn_cfg.get("fold", 0)))
+    cfg = config["stage_3"]
+    modalities = list(cfg.get("modalities") or config["stage_1"]["modalities"])
+
+    images_tr = paths["images_tr"]
+    labels_tr = paths["labels_tr"]
     report_path = paths["audit_report"]
     log_path = paths["output_log"]
+    dataset_json = paths["dataset_json"]
 
-    print("[*] Auditoría Stage 3")
-    print(f"    raw:          {paths['nnunet_raw']}")
-    print(f"    preprocessed: {paths['nnunet_preprocessed']}")
-    print(f"    results:      {paths['nnunet_results']}")
-    print(f"    folds:        {folds}")
+    case_ids: list[str] = []
+    if labels_tr.exists():
+        case_ids = sorted(
+            p.name.replace(".nii.gz", "").replace(".nii", "")
+            for p in labels_tr.glob("*.nii*")
+            if not p.name.startswith("._")
+        )
+
+    expected_train: list[str] = []
+    if paths["split_json"].exists():
+        expected_train = load_split_json(paths["split_json"])["train"]
 
     rows: list[dict] = []
+    print("[*] Auditoría Stage 3")
+    print(f"    dataset:  {paths['dataset_folder']}")
+    print(f"    imagesTr: {images_tr}")
+    print(f"    labelsTr: {labels_tr}")
+    print(f"    casos train (labels): {len(case_ids)}")
+    if expected_train:
+        print(f"    esperados split train: {len(expected_train)}")
 
-    ok_ds, ds_msg = verify_stage2_dataset(paths)
-    rows.append(
-        {
-            "step": "stage2_dataset",
-            "status": STATUS_PLANNED if ok_ds else STATUS_FAIL,
-            "reason": "" if ok_ds else "missing_dataset",
-            "details": ds_msg,
-        }
-    )
-    flag = "+" if ok_ds else "-"
-    print(f"  [{flag}] stage2_dataset: {ds_msg}")
-
-    status, reason, details = verify_plans(paths)
-    rows.append(
-        {
-            "step": "plans",
-            "status": status,
-            "reason": reason,
-            "details": details.get("plans_json") or details.get("expected", ""),
-        }
-    )
-    flag = "+" if status != STATUS_FAIL else "-"
-    print(f"  [{flag}] plans: {status} {reason}".rstrip())
-
-    for fold in folds:
-        st, rs, det = verify_fold_checkpoint(paths, fold)
+    for case_id in case_ids:
+        status, reason, details = verify_stage_3_output(
+            case_id, images_tr, labels_tr, modalities
+        )
+        geom = details.get("geometry") or {}
+        size = geom.get("size")
+        size_str = "x".join(str(s) for s in size) if size else ""
         rows.append(
             {
-                "step": f"fold_{fold}",
-                "status": st,
-                "reason": rs,
-                "details": det.get("checkpoint") or det.get("expected", ""),
+                "case_id": case_id,
+                "status": status,
+                "reason": reason,
+                "size": size_str,
+                "details": details.get("details", "") if status != STATUS_OK else "OK",
             }
         )
-        flag = "+" if st == STATUS_OK else "-"
-        print(f"  [{flag}] fold_{fold}: {st} {rs}".rstrip())
-    results_dir = expected_results_dir(
-        paths["nnunet_results"],
-        dataset_name=paths["dataset_name"],
-        trainer=paths["trainer"],
-        plans=paths["plans"],
-        configuration=paths["configuration"],
-    )
+        flag = "+" if status == STATUS_OK else "-"
+        print(f"  [{flag}] {case_id}: {status}" + (f" ({reason})" if reason else ""))
 
-    log_summary = "No se encontró training_log.csv"
-    if log_path.exists():
-        log_df = pd.read_csv(log_path)
-        log_summary = (
-            f"training_log.csv: {len(log_df)} filas; "
-            f"statuses={log_df['status'].value_counts().to_dict() if 'status' in log_df else {}}"
+    df = pd.DataFrame(rows)
+    n_ok = int((df["status"] == STATUS_OK).sum()) if not df.empty else 0
+    n_fail = len(df) - n_ok
+
+    split_check = "split.json: ausente"
+    if expected_train:
+        missing = sorted(set(expected_train) - set(case_ids))
+        extra = sorted(set(case_ids) - set(expected_train))
+        split_ok = not missing and not extra
+        split_check = (
+            f"split train match: {split_ok} "
+            f"(missing={len(missing)}, extra={len(extra)})"
         )
 
-    n_ok = sum(1 for r in rows if r["status"] in {STATUS_OK, STATUS_PLANNED})
-    n_fail = sum(1 for r in rows if r["status"] == STATUS_FAIL)
+    log_summary = "No se encontró conversion_log.csv"
+    if log_path.exists():
+        log_df = pd.read_csv(log_path)
+        log_ok = int((log_df["status"] == STATUS_OK).sum())
+        log_fail = len(log_df) - log_ok
+        log_summary = f"conversion_log.csv: {log_ok} OK, {log_fail} FAILED (total {len(log_df)})"
+
+    json_summary = "dataset.json: ausente"
+    if dataset_json.exists():
+        meta = json.loads(dataset_json.read_text(encoding="utf-8"))
+        json_summary = (
+            f"dataset.json: numTraining={meta.get('numTraining')}, "
+            f"channels={meta.get('channel_names')}, labels={meta.get('labels')}"
+        )
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
@@ -104,41 +106,47 @@ def audit_stage_3(config: dict) -> Path:
         "",
         "## Resumen",
         "",
-        f"- Checks OK/PLANNED: {n_ok}",
-        f"- Checks FAILED: {n_fail}",
+        f"- Casos auditados (labelsTr): {len(case_ids)}",
+        f"- {STATUS_OK}: {n_ok}",
+        f"- {STATUS_FAIL}: {n_fail}",
+        f"- {split_check}",
         f"- {log_summary}",
+        f"- {json_summary}",
         "",
         "## Criterios",
         "",
-        "- Dataset Stage 2 presente (imagesTr/labelsTr/dataset.json).",
-        f"- Plans: `{{nnUNet_preprocessed}}/{paths['dataset_name']}/{paths['plans']}.json`.",
-        f"- Checkpoint por fold: `{results_dir}/fold_X/checkpoint_final.pth`.",
-        f"- Configuración: {paths['configuration']} | trainer: {paths['trainer']}.",
+        f"- {len(modalities)} canales por caso + label (solo subset train del split).",
+        f"- Orden de canales: {modalities}.",
+        "- Mismo size, spacing, origin y direction (mellizos).",
+        "- MRI float; seg uint8 con clases Decathlon {0,1,2,3}.",
         "",
-        "## Detalle",
+        "## Detalle por caso",
         "",
-        "| step | status | reason | details |",
-        "|------|--------|--------|---------|",
+        "| case_id | status | reason | size | details |",
+        "|---------|--------|--------|------|---------|",
     ]
     for row in rows:
         lines.append(
-            f"| {row['step']} | {row['status']} | {row['reason'] or '-'} | {row['details']} |"
+            f"| {row['case_id']} | {row['status']} | {row['reason'] or '-'} | "
+            f"{row['size'] or '-'} | {row['details']} |"
         )
+    if not rows:
+        lines.append("| (sin casos) | - | - | - | - |")
+
     lines.extend(
         [
             "",
             "## Rutas",
             "",
-            f"- Dataset raw: `{paths['dataset_folder']}`",
-            f"- Preprocessed: `{paths['nnunet_preprocessed']}`",
-            f"- Results: `{results_dir}`",
+            f"- Dataset: `{paths['dataset_folder']}`",
+            f"- split.json: `{paths['split_json']}`",
             f"- Log: `{log_path}`",
             "",
         ]
     )
     report_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"[*] Reporte: {report_path}")
-    print(f"[*] Resumen: {n_ok} OK/PLANNED, {n_fail} FAILED")
+    print(f"[*] Resumen: {n_ok} OK, {n_fail} FAILED")
     return report_path
 
 
